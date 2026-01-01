@@ -8,16 +8,42 @@
  * - Authentification Basic Auth + paramètres SOAP
  * - Données d'entrée/sortie en XML encapsulées dans le message SOAP
  *
+ * Support Fixie Socks :
+ * - Si FIXIE_SOCKS_HOST est défini, les requêtes passent par le proxy SOCKS5
+ * - Cela permet d'avoir une IP statique pour les firewalls
+ *
  * @module services/sageX3Service
  */
 
 const soap = require('soap');
+const { SocksProxyAgent } = require('socks-proxy-agent');
 const { XMLParser, XMLBuilder } = require('fast-xml-parser');
 const { config } = require('../config/env');
 const { createModuleLogger } = require('../utils/logger');
 
 // Logger dédié à ce module
 const log = createModuleLogger('sageX3Service');
+
+/**
+ * Crée un agent SOCKS5 pour le proxy Fixie si configuré
+ * @returns {SocksProxyAgent|undefined} Agent SOCKS5 ou undefined
+ */
+function createSocksAgent() {
+  const fixieSocksHost = process.env.FIXIE_SOCKS_HOST;
+
+  if (!fixieSocksHost) {
+    log.debug('Pas de proxy SOCKS5 configuré pour Sage X3');
+    return undefined;
+  }
+
+  log.info('Configuration du proxy SOCKS5 pour Sage X3', {
+    proxy: fixieSocksHost.replace(/:[^:]*@/, ':***@'), // Masquer le mot de passe
+  });
+
+  // Format FIXIE_SOCKS_HOST : username:password@host:port
+  const proxyUrl = `socks5://${fixieSocksHost}`;
+  return new SocksProxyAgent(proxyUrl);
+}
 
 // Options pour le parser XML
 const xmlParserOptions = {
@@ -43,6 +69,7 @@ let soapClient = null;
  * Cette fonction crée le client SOAP et configure :
  * - L'authentification Basic Auth
  * - Les options de sécurité (certificats SSL, etc.)
+ * - Le proxy SOCKS5 Fixie si configuré
  *
  * @returns {Promise<Object>} Client SOAP initialisé
  * @throws {Error} Si la connexion au WSDL échoue
@@ -58,9 +85,12 @@ async function initSoapClient() {
   });
 
   try {
+    // Créer l'agent SOCKS5 si Fixie est configuré
+    const socksAgent = createSocksAgent();
+
     // Options du client SOAP
     const soapOptions = {
-      // Options de connexion
+      // Options de connexion pour récupérer le WSDL
       wsdl_options: {
         // Authentification Basic Auth pour récupérer le WSDL
         auth: {
@@ -71,6 +101,8 @@ async function initSoapClient() {
         rejectUnauthorized: config.server.isProduction,
         // Timeout de connexion
         timeout: config.security.apiTimeout,
+        // Utiliser le proxy SOCKS5 si disponible
+        agent: socksAgent,
       },
     };
 
@@ -82,7 +114,17 @@ async function initSoapClient() {
       new soap.BasicAuthSecurity(config.sageX3.user, config.sageX3.password)
     );
 
-    log.info('Client SOAP Sage X3 initialisé avec succès');
+    // Configurer l'agent SOCKS5 pour les appels SOAP si disponible
+    if (socksAgent) {
+      soapClient.setEndpoint(config.sageX3.wsdlUrl.replace('?wsdl', ''));
+      // Configurer l'agent HTTP pour les requêtes SOAP
+      soapClient.httpClient.options = soapClient.httpClient.options || {};
+      soapClient.httpClient.options.agent = socksAgent;
+    }
+
+    log.info('Client SOAP Sage X3 initialisé avec succès', {
+      proxyEnabled: !!socksAgent,
+    });
 
     return soapClient;
   } catch (error) {

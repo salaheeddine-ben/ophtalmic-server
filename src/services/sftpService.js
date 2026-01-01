@@ -7,16 +7,87 @@
  * - Liste des fichiers/dossiers
  * - Création de dossiers
  *
+ * Support Fixie Socks :
+ * - Si FIXIE_SOCKS_HOST est défini, les connexions SFTP passent par le proxy SOCKS5
+ * - Cela permet d'avoir une IP statique pour les firewalls
+ *
  * @module services/sftpService
  */
 
 const SftpClient = require('ssh2-sftp-client');
+const { SocksClient } = require('socks');
 const path = require('path');
 const { config } = require('../config/env');
 const { createModuleLogger } = require('../utils/logger');
 
 // Logger dédié à ce module
 const log = createModuleLogger('sftpService');
+
+/**
+ * Parse l'URL du proxy SOCKS5 Fixie
+ * Format attendu: username:password@host:port
+ *
+ * @returns {Object|null} Configuration du proxy ou null si non configuré
+ */
+function parseFixieSocksUrl() {
+  const fixieSocksHost = process.env.FIXIE_SOCKS_HOST;
+
+  if (!fixieSocksHost) {
+    return null;
+  }
+
+  try {
+    // Format: username:password@host:port
+    const [credentials, hostPort] = fixieSocksHost.split('@');
+    const [username, password] = credentials.split(':');
+    const [host, port] = hostPort.split(':');
+
+    return {
+      host,
+      port: parseInt(port, 10),
+      type: 5, // SOCKS5
+      userId: username,
+      password,
+    };
+  } catch (error) {
+    log.error('Erreur lors du parsing de FIXIE_SOCKS_HOST', {
+      error: error.message,
+    });
+    return null;
+  }
+}
+
+/**
+ * Crée une connexion socket via le proxy SOCKS5
+ *
+ * @param {string} targetHost - Hôte de destination
+ * @param {number} targetPort - Port de destination
+ * @returns {Promise<net.Socket>} Socket connecté via le proxy
+ */
+async function createSocksConnection(targetHost, targetPort) {
+  const proxyConfig = parseFixieSocksUrl();
+
+  if (!proxyConfig) {
+    return null;
+  }
+
+  log.info('Création de la connexion SFTP via proxy SOCKS5', {
+    proxyHost: proxyConfig.host,
+    targetHost,
+    targetPort,
+  });
+
+  const { socket } = await SocksClient.createConnection({
+    proxy: proxyConfig,
+    command: 'connect',
+    destination: {
+      host: targetHost,
+      port: targetPort,
+    },
+  });
+
+  return socket;
+}
 
 /**
  * Crée et retourne une nouvelle instance de client SFTP
@@ -30,9 +101,13 @@ function createSftpClient() {
 /**
  * Configuration de connexion SFTP
  * Extraite de la configuration globale
+ * Inclut le socket proxy SOCKS5 si configuré
+ *
+ * @param {net.Socket|null} socksSocket - Socket SOCKS5 optionnel
+ * @returns {Object} Configuration SFTP
  */
-function getSftpConfig() {
-  return {
+function getSftpConfig(socksSocket = null) {
+  const baseConfig = {
     host: config.sftp.host,
     port: config.sftp.port,
     username: config.sftp.user,
@@ -43,6 +118,38 @@ function getSftpConfig() {
     retry_factor: 2, // Backoff exponentiel
     retry_minTimeout: 2000, // Attente minimum entre les retries
   };
+
+  // Si un socket SOCKS5 est fourni, l'utiliser pour la connexion
+  if (socksSocket) {
+    baseConfig.sock = socksSocket;
+    log.debug('Utilisation du socket SOCKS5 pour SFTP');
+  }
+
+  return baseConfig;
+}
+
+/**
+ * Connecte le client SFTP avec ou sans proxy SOCKS5
+ *
+ * @param {SftpClient} sftp - Instance du client SFTP
+ * @returns {Promise<void>}
+ */
+async function connectWithProxy(sftp) {
+  const proxyConfig = parseFixieSocksUrl();
+
+  if (proxyConfig) {
+    // Créer la connexion via le proxy SOCKS5
+    const socksSocket = await createSocksConnection(
+      config.sftp.host,
+      config.sftp.port
+    );
+    await sftp.connect(getSftpConfig(socksSocket));
+    log.info('Connexion SFTP établie via proxy SOCKS5');
+  } else {
+    // Connexion directe sans proxy
+    await sftp.connect(getSftpConfig());
+    log.debug('Connexion SFTP directe établie');
+  }
 }
 
 /**
@@ -74,9 +181,8 @@ async function uploadFile(content, remoteFileName, remoteDir = config.sftp.remot
   });
 
   try {
-    // Connexion au serveur SFTP
-    await sftp.connect(getSftpConfig());
-    log.debug('Connexion SFTP établie');
+    // Connexion au serveur SFTP (avec proxy SOCKS5 si configuré)
+    await connectWithProxy(sftp);
 
     // Vérifier/créer le dossier distant
     const dirExists = await sftp.exists(remoteDir);
@@ -135,8 +241,8 @@ async function listFiles(remoteDir = config.sftp.remoteDir) {
   log.info('Liste des fichiers SFTP', { remoteDir });
 
   try {
-    await sftp.connect(getSftpConfig());
-    log.debug('Connexion SFTP établie');
+    // Connexion au serveur SFTP (avec proxy SOCKS5 si configuré)
+    await connectWithProxy(sftp);
 
     // Vérifier si le dossier existe
     const dirExists = await sftp.exists(remoteDir);
@@ -193,8 +299,8 @@ async function downloadFile(remoteFileName, remoteDir = config.sftp.remoteDir) {
   log.info('Téléchargement de fichier SFTP', { remotePath });
 
   try {
-    await sftp.connect(getSftpConfig());
-    log.debug('Connexion SFTP établie');
+    // Connexion au serveur SFTP (avec proxy SOCKS5 si configuré)
+    await connectWithProxy(sftp);
 
     // Vérifier si le fichier existe
     const fileExists = await sftp.exists(remotePath);
@@ -243,8 +349,8 @@ async function deleteFile(remoteFileName, remoteDir = config.sftp.remoteDir) {
   log.info('Suppression de fichier SFTP', { remotePath });
 
   try {
-    await sftp.connect(getSftpConfig());
-    log.debug('Connexion SFTP établie');
+    // Connexion au serveur SFTP (avec proxy SOCKS5 si configuré)
+    await connectWithProxy(sftp);
 
     // Vérifier si le fichier existe
     const fileExists = await sftp.exists(remotePath);
@@ -296,11 +402,12 @@ async function testConnection() {
     host: config.sftp.host,
     port: config.sftp.port,
     user: config.sftp.user,
+    proxyEnabled: !!process.env.FIXIE_SOCKS_HOST,
   });
 
   try {
-    await sftp.connect(getSftpConfig());
-    log.debug('Connexion SFTP établie');
+    // Connexion au serveur SFTP (avec proxy SOCKS5 si configuré)
+    await connectWithProxy(sftp);
 
     // Récupérer le répertoire courant
     const cwd = await sftp.cwd();
@@ -339,6 +446,7 @@ async function testConnection() {
       host: config.sftp.host,
       port: config.sftp.port,
       user: config.sftp.user,
+      proxyEnabled: !!process.env.FIXIE_SOCKS_HOST,
       currentDirectory: cwd,
       destinationDirectory: destDirInfo,
     };
@@ -346,6 +454,7 @@ async function testConnection() {
     log.error('Échec du test de connexion SFTP', {
       error: error.message,
       host: config.sftp.host,
+      proxyEnabled: !!process.env.FIXIE_SOCKS_HOST,
     });
 
     return {
@@ -375,8 +484,8 @@ async function createDirectory(remoteDir) {
   log.info('Création de dossier SFTP', { remoteDir });
 
   try {
-    await sftp.connect(getSftpConfig());
-    log.debug('Connexion SFTP établie');
+    // Connexion au serveur SFTP (avec proxy SOCKS5 si configuré)
+    await connectWithProxy(sftp);
 
     // Vérifier si le dossier existe déjà
     const dirExists = await sftp.exists(remoteDir);

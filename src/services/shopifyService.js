@@ -11,10 +11,15 @@
  * - Format JSON
  * - Rate limiting (2 requêtes/seconde pour la plupart des endpoints)
  *
+ * Support Fixie Socks :
+ * - Si FIXIE_SOCKS_HOST est défini, les requêtes passent par le proxy SOCKS5
+ * - Cela permet d'avoir une IP statique pour les firewalls
+ *
  * @module services/shopifyService
  */
 
 const axios = require('axios');
+const { SocksProxyAgent } = require('socks-proxy-agent');
 const { config } = require('../config/env');
 const { createModuleLogger } = require('../utils/logger');
 
@@ -22,10 +27,36 @@ const { createModuleLogger } = require('../utils/logger');
 const log = createModuleLogger('shopifyService');
 
 /**
+ * Crée un agent SOCKS5 pour le proxy Fixie si configuré
+ * @returns {SocksProxyAgent|undefined} Agent SOCKS5 ou undefined
+ */
+function createSocksAgent() {
+  const fixieSocksHost = process.env.FIXIE_SOCKS_HOST;
+
+  if (!fixieSocksHost) {
+    log.debug('Pas de proxy SOCKS5 configuré pour Shopify');
+    return undefined;
+  }
+
+  log.info('Configuration du proxy SOCKS5 pour Shopify', {
+    proxy: fixieSocksHost.replace(/:[^:]*@/, ':***@'), // Masquer le mot de passe
+  });
+
+  // Format FIXIE_SOCKS_HOST : username:password@host:port
+  // On doit le convertir en URL socks5://
+  const proxyUrl = `socks5://${fixieSocksHost}`;
+  return new SocksProxyAgent(proxyUrl);
+}
+
+/**
  * Crée une instance Axios configurée pour l'API Shopify
  * Avec gestion des headers d'authentification et du rate limiting
+ * Utilise le proxy SOCKS5 Fixie si configuré
  */
 function createShopifyClient() {
+  // Créer l'agent SOCKS5 si Fixie est configuré
+  const socksAgent = createSocksAgent();
+
   const client = axios.create({
     baseURL: `https://${config.shopify.storeUrl}/admin/api/${config.shopify.apiVersion}`,
     headers: {
@@ -33,6 +64,9 @@ function createShopifyClient() {
       'X-Shopify-Access-Token': config.shopify.accessToken,
     },
     timeout: config.security.apiTimeout,
+    // Utiliser l'agent SOCKS5 pour HTTP et HTTPS si disponible
+    httpAgent: socksAgent,
+    httpsAgent: socksAgent,
   });
 
   // Intercepteur pour logger les requêtes
