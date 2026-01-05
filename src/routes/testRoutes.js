@@ -742,6 +742,7 @@ router.get(
  *
  * Route de debug Sage X3 avec affichage détaillé étape par étape.
  * Affiche directement en HTML pour capture d'écran.
+ * Timeout réduit à 20s pour éviter le timeout Heroku (30s max).
  *
  * @route GET /test/debug-sage
  */
@@ -749,11 +750,12 @@ router.get(
   '/debug-sage',
   asyncHandler(async (req, res) => {
     const soap = require('soap');
+    const axios = require('axios');
     const { SocksProxyAgent } = require('socks-proxy-agent');
-    const https = require('https');
 
     const steps = [];
     const startTime = Date.now();
+    const TIMEOUT = 20000; // 20 secondes (< 30s Heroku limit)
 
     // Helper pour ajouter une étape
     const addStep = (step, status, details = {}) => {
@@ -814,19 +816,46 @@ router.get(
       });
     }
 
-    // Étape 3: Test de connectivité TCP au serveur
-    addStep('🔄 Test de connectivité vers le serveur Sage X3...', 'info', {
+    // Étape 3: Vérification de l'IP sortante via le proxy
+    if (socksAgent) {
+      addStep('🔄 Vérification de l\'IP sortante via le proxy...', 'info', {
+        service: 'api.ipify.org',
+      });
+
+      try {
+        const ipResponse = await axios.get('https://api.ipify.org?format=json', {
+          httpsAgent: socksAgent,
+          httpAgent: socksAgent,
+          timeout: 10000,
+        });
+
+        const detectedIP = ipResponse.data.ip;
+        const isFixieIP = fixieIPs.includes(detectedIP);
+
+        addStep(isFixieIP ? '✅ IP sortante vérifiée' : '⚠️ IP sortante inattendue', isFixieIP ? 'success' : 'warning', {
+          detectedIP: detectedIP,
+          isFixieIP: isFixieIP,
+          expectedIPs: fixieIPs.join(', '),
+          message: isFixieIP
+            ? `L'IP ${detectedIP} est bien une IP Fixie - C'est cette IP qui doit être whitelistée`
+            : `L'IP ${detectedIP} n'est pas dans la liste Fixie attendue`,
+        });
+      } catch (ipError) {
+        addStep('⚠️ Impossible de vérifier l\'IP sortante', 'warning', {
+          error: ipError.message,
+          note: 'Le test continue avec les IPs Fixie attendues',
+        });
+      }
+    }
+
+    // Étape 4: Test de connectivité TCP au serveur
+    addStep('🔄 Tentative de connexion vers Sage X3...', 'info', {
       target: `${sageHost}:${sagePort}`,
       viaProxy: socksAgent ? 'Oui (IP Fixie)' : 'Non (IP Heroku dynamique)',
-      expectedIP: socksAgent ? fixieIPs.join(' ou ') : 'IP dynamique Heroku',
+      timeout: `${TIMEOUT}ms`,
     });
 
-    // Étape 4: Tentative de récupération du WSDL
-    addStep('🔄 Tentative de récupération du WSDL...', 'info', {
-      url: wsdlUrl,
-      timeout: `${config.security.apiTimeout}ms`,
-    });
-
+    // Étape 5: Tentative de récupération du WSDL
     try {
       const soapOptions = {
         wsdl_options: {
@@ -835,7 +864,7 @@ router.get(
             pass: config.sageX3.password,
           },
           rejectUnauthorized: false,
-          timeout: config.security.apiTimeout,
+          timeout: TIMEOUT,
           agent: socksAgent,
         },
       };
@@ -887,14 +916,14 @@ router.get(
         code: soapError.code,
       };
 
-      if (soapError.message.includes('timeout') || soapError.message.includes('ETIMEDOUT')) {
+      if (soapError.message.includes('timeout') || soapError.message.includes('ETIMEDOUT') || soapError.message.includes('ESOCKETTIMEDOUT')) {
         errorDetails.possibleCauses = [
           'Les IPs Fixie ne sont pas whitelistées sur le firewall Sage X3',
           `IPs à whitelister: ${fixieIPs.join(', ')}`,
           'Le serveur Sage X3 est inaccessible',
-          'Le port 4433 est bloqué',
+          'Le port est bloqué',
         ];
-        errorDetails.recommendation = 'Demander au client de whitelister les IPs Fixie';
+        errorDetails.recommendation = 'Demander au client de whitelister les IPs Fixie sur le firewall';
       } else if (soapError.message.includes('ECONNREFUSED')) {
         errorDetails.possibleCauses = [
           'Le serveur refuse la connexion',
@@ -905,9 +934,14 @@ router.get(
           'Identifiants incorrects',
           'Compte utilisateur bloqué',
         ];
+      } else if (soapError.message.includes('ENOTFOUND')) {
+        errorDetails.possibleCauses = [
+          'Le nom de domaine n\'existe pas',
+          'Erreur DNS',
+        ];
       }
 
-      addStep('❌ Échec récupération WSDL', 'error', errorDetails);
+      addStep('❌ Échec connexion Sage X3', 'error', errorDetails);
     }
 
     // Résumé final
