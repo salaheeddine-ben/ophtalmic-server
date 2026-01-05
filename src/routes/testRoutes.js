@@ -538,6 +538,7 @@ router.get('/health', (req, res) => {
  *
  * Route de debug SFTP avec affichage détaillé étape par étape.
  * Affiche directement en HTML pour capture d'écran.
+ * Timeout réduit à 20s pour éviter le timeout Heroku (30s max).
  *
  * @route GET /test/debug-sftp
  */
@@ -546,9 +547,12 @@ router.get(
   asyncHandler(async (req, res) => {
     const SftpClient = require('ssh2-sftp-client');
     const { SocksClient } = require('socks');
+    const axios = require('axios');
+    const { SocksProxyAgent } = require('socks-proxy-agent');
 
     const steps = [];
     const startTime = Date.now();
+    const TIMEOUT = 20000; // 20 secondes (< 30s Heroku limit)
 
     // Helper pour ajouter une étape
     const addStep = (step, status, details = {}) => {
@@ -603,7 +607,42 @@ router.get(
       });
     }
 
-    // Étape 3: Création connexion SOCKS5 vers SFTP
+    // Étape 3: Vérification de l'IP sortante via le proxy
+    if (fixieSocksHost) {
+      addStep('🔄 Vérification de l\'IP sortante via le proxy...', 'info', {
+        service: 'api.ipify.org',
+      });
+
+      try {
+        const proxyUrl = `socks5://${fixieSocksHost}`;
+        const socksAgent = new SocksProxyAgent(proxyUrl);
+
+        const ipResponse = await axios.get('https://api.ipify.org?format=json', {
+          httpsAgent: socksAgent,
+          httpAgent: socksAgent,
+          timeout: 10000,
+        });
+
+        const detectedIP = ipResponse.data.ip;
+        const isFixieIP = fixieIPs.includes(detectedIP);
+
+        addStep(isFixieIP ? '✅ IP sortante vérifiée' : '⚠️ IP sortante inattendue', isFixieIP ? 'success' : 'warning', {
+          detectedIP: detectedIP,
+          isFixieIP: isFixieIP,
+          expectedIPs: fixieIPs.join(', '),
+          message: isFixieIP
+            ? `L'IP ${detectedIP} est bien une IP Fixie - C'est cette IP qui doit être whitelistée`
+            : `L'IP ${detectedIP} n'est pas dans la liste Fixie attendue`,
+        });
+      } catch (ipError) {
+        addStep('⚠️ Impossible de vérifier l\'IP sortante', 'warning', {
+          error: ipError.message,
+          note: 'Le test continue avec les IPs Fixie attendues',
+        });
+      }
+    }
+
+    // Étape 4: Création connexion SOCKS5 vers SFTP
     let socksSocket = null;
     if (proxyConfig) {
       addStep('🔄 Tentative de connexion via proxy SOCKS5...', 'info', {
@@ -618,7 +657,7 @@ router.get(
           proxy: proxyConfig,
           command: 'connect',
           destination: { host: sftpHost, port: sftpPort },
-          timeout: 30000,
+          timeout: TIMEOUT,
         });
         socksSocket = socket;
 
@@ -630,12 +669,16 @@ router.get(
         addStep('❌ Échec connexion SOCKS5', 'error', {
           error: socksError.message,
           code: socksError.code,
-          possibleCause: 'Le serveur SFTP ne répond pas ou IP non whitelistée',
+          possibleCauses: [
+            'Le serveur SFTP ne répond pas',
+            'IP non whitelistée sur le firewall',
+            `IPs à whitelister: ${fixieIPs.join(', ')}`,
+          ],
         });
       }
     }
 
-    // Étape 4: Connexion SFTP
+    // Étape 5: Connexion SFTP
     const sftp = new SftpClient();
     let sftpConnected = false;
 
@@ -653,7 +696,7 @@ router.get(
           port: sftpPort,
           username: sftpUser,
           password: config.sftp.password,
-          readyTimeout: 20000,
+          readyTimeout: TIMEOUT,
         };
 
         if (socksSocket) {
@@ -669,7 +712,7 @@ router.get(
           message: 'Authentification SSH réussie',
         });
 
-        // Étape 5: Lister le dossier
+        // Étape 6: Lister le dossier
         try {
           const cwd = await sftp.cwd();
           addStep('📂 Répertoire courant', 'success', { cwd });
@@ -699,6 +742,7 @@ router.get(
             'IP non whitelistée sur le serveur SFTP',
             'Identifiants incorrects',
             'Serveur SFTP inaccessible',
+            `IPs à whitelister: ${fixieIPs.join(', ')}`,
           ],
         });
       }
@@ -923,7 +967,6 @@ router.get(
           'Le serveur Sage X3 est inaccessible',
           'Le port est bloqué',
         ];
-        errorDetails.recommendation = 'Demander au client de whitelister les IPs Fixie sur le firewall';
       } else if (soapError.message.includes('ECONNREFUSED')) {
         errorDetails.possibleCauses = [
           'Le serveur refuse la connexion',
