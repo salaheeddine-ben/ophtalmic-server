@@ -114,9 +114,14 @@ async function initSoapClient() {
       new soap.BasicAuthSecurity(config.sageX3.user, config.sageX3.password)
     );
 
+    // Configurer l'endpoint SOAP (soap-generic au lieu de soap-wsdl)
+    // Si endpointUrl est défini, l'utiliser, sinon dériver du WSDL
+    const endpointUrl = config.sageX3.endpointUrl || config.sageX3.wsdlUrl.replace('?wsdl', '');
+    soapClient.setEndpoint(endpointUrl);
+    log.debug('Endpoint SOAP configuré', { endpointUrl });
+
     // Configurer l'agent SOCKS5 pour les appels SOAP si disponible
     if (socksAgent) {
-      soapClient.setEndpoint(config.sageX3.wsdlUrl.replace('?wsdl', ''));
       // Configurer l'agent HTTP pour les requêtes SOAP
       soapClient.httpClient.options = soapClient.httpClient.options || {};
       soapClient.httpClient.options.agent = socksAgent;
@@ -285,11 +290,11 @@ async function getProductStock(eanCode = config.product.hydrofellEan) {
 
     // Paramètres de l'appel SOAP
     // Structure selon la documentation Sage X3 WebService
+    // Note: codeUser et password NE DOIVENT PAS être dans callContext
+    // L'authentification se fait uniquement via Basic Auth dans le header HTTP
     const soapParams = {
       callContext: {
         codeLang: config.sageX3.codeLang,
-        codeUser: config.sageX3.user,
-        password: config.sageX3.password,
         poolAlias: config.sageX3.poolAlias,
         poolId: '', // Optionnel
         requestConfig: '', // Optionnel

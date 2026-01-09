@@ -56,14 +56,17 @@ const config = {
   // Configuration Sage X3 - Webservice SOAP
   // ============================================
   sageX3: {
-    // URL du WSDL pour le client SOAP
+    // URL du WSDL pour le client SOAP (pour récupérer le schéma)
     wsdlUrl: process.env.SAGE_X3_WSDL_URL,
 
-    // Credentials d'authentification
+    // URL de l'endpoint SOAP (pour les appels - soap-generic)
+    endpointUrl: process.env.SAGE_X3_ENDPOINT_URL,
+
+    // Credentials d'authentification (Basic Auth dans header HTTP uniquement)
     user: process.env.SAGE_X3_USER,
     password: process.env.SAGE_X3_PASSWORD,
 
-    // Alias du pool de base de données (DOPHTA pour dev, POHTA pour prod)
+    // Alias du pool de base de données (DOPHTA pour dev, POPHTA pour prod)
     poolAlias: process.env.SAGE_X3_POOL_ALIAS,
 
     // Code du site de stockage
