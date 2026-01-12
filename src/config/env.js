@@ -77,6 +77,11 @@ const config = {
 
     // Code langue pour Sage X3
     codeLang: 'FRA',
+
+    // Certificat SSL client pour mutual TLS (encodé en Base64)
+    clientCertBase64: process.env.SAGE_X3_CLIENT_CERT_BASE64,
+    clientKeyBase64: process.env.SAGE_X3_CLIENT_KEY_BASE64,
+    clientKeyPassphrase: process.env.SAGE_X3_CLIENT_KEY_PASSPHRASE,
   },
 
   // ============================================

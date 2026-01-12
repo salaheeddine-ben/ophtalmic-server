@@ -16,6 +16,7 @@
  */
 
 const soap = require('soap');
+const https = require('https');
 const { SocksProxyAgent } = require('socks-proxy-agent');
 const { XMLParser, XMLBuilder } = require('fast-xml-parser');
 const { config } = require('../config/env');
@@ -23,6 +24,52 @@ const { createModuleLogger } = require('../utils/logger');
 
 // Logger dédié à ce module
 const log = createModuleLogger('sageX3Service');
+
+/**
+ * Crée un agent HTTPS avec le certificat client SSL si configuré
+ * Nécessaire pour l'authentification mutual TLS avec Sage X3
+ * @returns {https.Agent|undefined} Agent HTTPS ou undefined
+ */
+function createHttpsAgentWithCert() {
+  const certBase64 = config.sageX3.clientCertBase64;
+  const keyBase64 = config.sageX3.clientKeyBase64;
+
+  if (!certBase64) {
+    log.debug('Pas de certificat client SSL configuré pour Sage X3');
+    return undefined;
+  }
+
+  try {
+    // Décoder le certificat depuis Base64
+    const cert = Buffer.from(certBase64, 'base64').toString('utf-8');
+    log.info('Certificat client SSL chargé pour Sage X3');
+
+    const agentOptions = {
+      cert: cert,
+      rejectUnauthorized: config.server.isProduction, // Vérifier le certificat serveur en prod
+    };
+
+    // Ajouter la clé privée si disponible
+    if (keyBase64) {
+      agentOptions.key = Buffer.from(keyBase64, 'base64').toString('utf-8');
+      log.info('Clé privée SSL chargée pour Sage X3');
+
+      // Ajouter le passphrase si configuré
+      if (config.sageX3.clientKeyPassphrase) {
+        agentOptions.passphrase = config.sageX3.clientKeyPassphrase;
+      }
+    } else {
+      log.warn('⚠️  Certificat client sans clé privée - L\'authentification mutual TLS échouera');
+    }
+
+    return new https.Agent(agentOptions);
+  } catch (error) {
+    log.error('Erreur lors du chargement du certificat client SSL', {
+      error: error.message,
+    });
+    return undefined;
+  }
+}
 
 /**
  * Crée un agent SOCKS5 pour le proxy Fixie si configuré
@@ -88,6 +135,12 @@ async function initSoapClient() {
     // Créer l'agent SOCKS5 si Fixie est configuré
     const socksAgent = createSocksAgent();
 
+    // Créer l'agent HTTPS avec certificat client si configuré
+    const httpsAgentWithCert = createHttpsAgentWithCert();
+
+    // Déterminer quel agent utiliser (SOCKS5 a priorité, sinon HTTPS avec cert)
+    const agent = socksAgent || httpsAgentWithCert;
+
     // Options du client SOAP
     const soapOptions = {
       // Options de connexion pour récupérer le WSDL
@@ -101,10 +154,22 @@ async function initSoapClient() {
         rejectUnauthorized: config.server.isProduction,
         // Timeout de connexion
         timeout: config.security.apiTimeout,
-        // Utiliser le proxy SOCKS5 si disponible
-        agent: socksAgent,
+        // Utiliser l'agent (SOCKS5 ou HTTPS avec cert)
+        agent: agent,
+        // Si on a un agent HTTPS avec cert mais pas de SOCKS, passer les options cert directement aussi
+        ...(httpsAgentWithCert && !socksAgent && {
+          cert: config.sageX3.clientCertBase64 ? Buffer.from(config.sageX3.clientCertBase64, 'base64').toString('utf-8') : undefined,
+          key: config.sageX3.clientKeyBase64 ? Buffer.from(config.sageX3.clientKeyBase64, 'base64').toString('utf-8') : undefined,
+          passphrase: config.sageX3.clientKeyPassphrase,
+        }),
       },
     };
+
+    log.info('Options SOAP configurées', {
+      hasProxy: !!socksAgent,
+      hasCertificate: !!httpsAgentWithCert,
+      hasPrivateKey: !!config.sageX3.clientKeyBase64,
+    });
 
     // Créer le client SOAP à partir du WSDL
     soapClient = await soap.createClientAsync(config.sageX3.wsdlUrl, soapOptions);
@@ -120,15 +185,29 @@ async function initSoapClient() {
     soapClient.setEndpoint(endpointUrl);
     log.debug('Endpoint SOAP configuré', { endpointUrl });
 
-    // Configurer l'agent SOCKS5 pour les appels SOAP si disponible
-    if (socksAgent) {
-      // Configurer l'agent HTTP pour les requêtes SOAP
+    // Configurer l'agent pour les appels SOAP (SOCKS5 ou HTTPS avec cert)
+    if (agent) {
       soapClient.httpClient.options = soapClient.httpClient.options || {};
-      soapClient.httpClient.options.agent = socksAgent;
+      soapClient.httpClient.options.agent = agent;
+
+      // Si on utilise un certificat client sans proxy SOCKS, configurer aussi les options cert
+      if (httpsAgentWithCert && !socksAgent) {
+        if (config.sageX3.clientCertBase64) {
+          soapClient.httpClient.options.cert = Buffer.from(config.sageX3.clientCertBase64, 'base64').toString('utf-8');
+        }
+        if (config.sageX3.clientKeyBase64) {
+          soapClient.httpClient.options.key = Buffer.from(config.sageX3.clientKeyBase64, 'base64').toString('utf-8');
+        }
+        if (config.sageX3.clientKeyPassphrase) {
+          soapClient.httpClient.options.passphrase = config.sageX3.clientKeyPassphrase;
+        }
+      }
     }
 
     log.info('Client SOAP Sage X3 initialisé avec succès', {
       proxyEnabled: !!socksAgent,
+      certificateEnabled: !!httpsAgentWithCert,
+      privateKeyEnabled: !!config.sageX3.clientKeyBase64,
     });
 
     return soapClient;
