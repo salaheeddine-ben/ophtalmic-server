@@ -26,45 +26,33 @@ const { createModuleLogger } = require('../utils/logger');
 const log = createModuleLogger('sageX3Service');
 
 /**
- * Crée un agent HTTPS avec le certificat client SSL si configuré
- * Nécessaire pour l'authentification mutual TLS avec Sage X3
+ * Crée un agent HTTPS avec le certificat CA de confiance si configuré
+ * Nécessaire pour faire confiance au certificat du serveur Sage X3 (auto-signé ou CA interne)
  * @returns {https.Agent|undefined} Agent HTTPS ou undefined
  */
 function createHttpsAgentWithCert() {
   const certBase64 = config.sageX3.clientCertBase64;
-  const keyBase64 = config.sageX3.clientKeyBase64;
 
   if (!certBase64) {
-    log.debug('Pas de certificat client SSL configuré pour Sage X3');
+    log.debug('Pas de certificat CA configuré pour Sage X3');
     return undefined;
   }
 
   try {
-    // Décoder le certificat depuis Base64
-    const cert = Buffer.from(certBase64, 'base64').toString('utf-8');
-    log.info('Certificat client SSL chargé pour Sage X3');
+    // Décoder le certificat CA depuis Base64
+    const caCert = Buffer.from(certBase64, 'base64').toString('utf-8');
+    log.info('Certificat CA chargé pour Sage X3 (trust du serveur)');
 
     const agentOptions = {
-      cert: cert,
-      rejectUnauthorized: config.server.isProduction, // Vérifier le certificat serveur en prod
+      // Le certificat est utilisé comme CA de confiance (pas comme cert client)
+      ca: caCert,
+      // Vérifier le certificat serveur avec notre CA
+      rejectUnauthorized: true,
     };
-
-    // Ajouter la clé privée si disponible
-    if (keyBase64) {
-      agentOptions.key = Buffer.from(keyBase64, 'base64').toString('utf-8');
-      log.info('Clé privée SSL chargée pour Sage X3');
-
-      // Ajouter le passphrase si configuré
-      if (config.sageX3.clientKeyPassphrase) {
-        agentOptions.passphrase = config.sageX3.clientKeyPassphrase;
-      }
-    } else {
-      log.warn('⚠️  Certificat client sans clé privée - L\'authentification mutual TLS échouera');
-    }
 
     return new https.Agent(agentOptions);
   } catch (error) {
-    log.error('Erreur lors du chargement du certificat client SSL', {
+    log.error('Erreur lors du chargement du certificat CA', {
       error: error.message,
     });
     return undefined;
@@ -150,25 +138,25 @@ async function initSoapClient() {
           user: config.sageX3.user,
           pass: config.sageX3.password,
         },
-        // Ignorer les erreurs de certificat SSL en développement
-        rejectUnauthorized: config.server.isProduction,
         // Timeout de connexion
         timeout: config.security.apiTimeout,
-        // Utiliser l'agent (SOCKS5 ou HTTPS avec cert)
+        // Utiliser l'agent (SOCKS5 ou HTTPS avec CA cert)
         agent: agent,
-        // Si on a un agent HTTPS avec cert mais pas de SOCKS, passer les options cert directement aussi
-        ...(httpsAgentWithCert && !socksAgent && {
-          cert: config.sageX3.clientCertBase64 ? Buffer.from(config.sageX3.clientCertBase64, 'base64').toString('utf-8') : undefined,
-          key: config.sageX3.clientKeyBase64 ? Buffer.from(config.sageX3.clientKeyBase64, 'base64').toString('utf-8') : undefined,
-          passphrase: config.sageX3.clientKeyPassphrase,
+        // Si on a un certificat CA configuré, l'ajouter pour faire confiance au serveur
+        ...(config.sageX3.clientCertBase64 && {
+          ca: Buffer.from(config.sageX3.clientCertBase64, 'base64').toString('utf-8'),
+          rejectUnauthorized: true,
+        }),
+        // Si pas de certificat CA, accepter en dev mais rejeter en prod
+        ...(!config.sageX3.clientCertBase64 && {
+          rejectUnauthorized: config.server.isProduction,
         }),
       },
     };
 
     log.info('Options SOAP configurées', {
       hasProxy: !!socksAgent,
-      hasCertificate: !!httpsAgentWithCert,
-      hasPrivateKey: !!config.sageX3.clientKeyBase64,
+      hasCACertificate: !!config.sageX3.clientCertBase64,
     });
 
     // Créer le client SOAP à partir du WSDL
@@ -185,29 +173,22 @@ async function initSoapClient() {
     soapClient.setEndpoint(endpointUrl);
     log.debug('Endpoint SOAP configuré', { endpointUrl });
 
-    // Configurer l'agent pour les appels SOAP (SOCKS5 ou HTTPS avec cert)
-    if (agent) {
-      soapClient.httpClient.options = soapClient.httpClient.options || {};
-      soapClient.httpClient.options.agent = agent;
+    // Configurer l'agent pour les appels SOAP (SOCKS5 ou HTTPS avec CA cert)
+    soapClient.httpClient.options = soapClient.httpClient.options || {};
 
-      // Si on utilise un certificat client sans proxy SOCKS, configurer aussi les options cert
-      if (httpsAgentWithCert && !socksAgent) {
-        if (config.sageX3.clientCertBase64) {
-          soapClient.httpClient.options.cert = Buffer.from(config.sageX3.clientCertBase64, 'base64').toString('utf-8');
-        }
-        if (config.sageX3.clientKeyBase64) {
-          soapClient.httpClient.options.key = Buffer.from(config.sageX3.clientKeyBase64, 'base64').toString('utf-8');
-        }
-        if (config.sageX3.clientKeyPassphrase) {
-          soapClient.httpClient.options.passphrase = config.sageX3.clientKeyPassphrase;
-        }
-      }
+    if (agent) {
+      soapClient.httpClient.options.agent = agent;
+    }
+
+    // Ajouter le certificat CA pour faire confiance au serveur Sage X3
+    if (config.sageX3.clientCertBase64) {
+      soapClient.httpClient.options.ca = Buffer.from(config.sageX3.clientCertBase64, 'base64').toString('utf-8');
+      soapClient.httpClient.options.rejectUnauthorized = true;
     }
 
     log.info('Client SOAP Sage X3 initialisé avec succès', {
       proxyEnabled: !!socksAgent,
-      certificateEnabled: !!httpsAgentWithCert,
-      privateKeyEnabled: !!config.sageX3.clientKeyBase64,
+      caCertificateEnabled: !!config.sageX3.clientCertBase64,
     });
 
     return soapClient;
