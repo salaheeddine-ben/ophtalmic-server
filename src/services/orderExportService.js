@@ -24,17 +24,9 @@ const log = createModuleLogger('orderExportService');
 /**
  * Génère le contenu du fichier TXT à partir d'une commande Shopify
  *
- * Format du fichier :
- * ```
- * ENTETE
- * REF_COMMANDE|[order.name]
- * REF_CLIENT|[code_client]
- * NOM|[shipping_address.last_name]
- * ...
- * LIGNES
- * SKU|DESIGNATION|QTE|PRIX_UNITAIRE_HT|PRIX_UNITAIRE_TTC
- * [sku]|[title]|[quantity]|[price]|[price]
- * ```
+ * Format du fichier selon les specs client Ophtalmic :
+ * - Section ENTETE avec les informations essentielles
+ * - Section LIGNES avec le détail des articles
  *
  * @param {Object} order - Commande Shopify (données du webhook)
  * @returns {string} Contenu formaté du fichier TXT
@@ -45,7 +37,7 @@ function generateOrderFileContent(order) {
     orderId: order.id,
   });
 
-  // Extraction des données de livraison
+  // Extraction des données de livraison et facturation
   const shipping = order.shipping_address || {};
   const billing = order.billing_address || shipping;
 
@@ -53,7 +45,6 @@ function generateOrderFileContent(order) {
   const shippingPrice = order.shipping_lines?.[0]?.price || '0.00';
 
   // Récupérer l'identifiant de transaction de paiement
-  // Peut être dans checkout_token, payment_gateway_names, ou transactions
   const transactionId = order.checkout_token
     || order.payment_gateway_names?.[0]
     || order.id?.toString()
@@ -62,69 +53,65 @@ function generateOrderFileContent(order) {
   // Formater la date au format AAAA-MM-JJ
   const orderDate = new Date(order.created_at).toISOString().split('T')[0];
 
+  // Calculer le pourcentage de remise global
+  const totalDiscount = parseFloat(order.total_discounts) || 0;
+  const subtotalBeforeDiscount = (parseFloat(order.subtotal_price) || 0) + totalDiscount;
+  const discountPercentage = subtotalBeforeDiscount > 0
+    ? ((totalDiscount / subtotalBeforeDiscount) * 100).toFixed(2)
+    : '0';
+
+  // Vérifier si l'adresse de facturation est différente de la livraison
+  const isBillingDifferent =
+    billing.address1 !== shipping.address1 ||
+    billing.city !== shipping.city ||
+    billing.zip !== shipping.zip;
+
   // ============================================
-  // Construire la section ENTETE
+  // Construire la section ENTETE (selon specs client)
   // ============================================
   const headerLines = [
     'ENTETE',
     `REF_COMMANDE|${order.name || order.order_number}`,
+    `REF_CLIENT|0147907400`,
     `DATE_COMMANDE|${orderDate}`,
-    // TODO: Le code client est à confirmer avec le client
-    // Il peut s'agir d'un code fixe ou d'un mapping depuis l'email/téléphone
-    `REF_CLIENT|${order.customer?.id || '0147907400'}`,
     `EMAIL_CLIENT|${order.email || ''}`,
     `TELEPHONE|${shipping.phone || billing.phone || ''}`,
     `NOM|${shipping.last_name || ''}`,
     `PRENOM|${shipping.first_name || ''}`,
-    `SOCIETE|${shipping.company || ''}`,
-    `ADRESSE|${shipping.address1 || ''}`,
-    `ADRESSE2|${shipping.address2 || ''}`,
-    `CP|${shipping.zip || ''}`,
-    `VILLE|${shipping.city || ''}`,
-    `PROVINCE|${shipping.province || ''}`,
-    `PAYS|${shipping.country_code || 'FR'}`,
+    `ADRESSE_LIVRAISON|${shipping.address1 || ''}`,
+    `CP_LIVRAISON|${shipping.zip || ''}`,
+    `VILLE_LIVRAISON|${shipping.city || ''}`,
+    `PAYS_LIVRAISON|${shipping.country_code || 'FR'}`,
     `FRAIS_PORT|${shippingPrice}`,
-    `MONTANT_HT|${order.subtotal_price || '0.00'}`,
-    `MONTANT_TAXES|${order.total_tax || '0.00'}`,
     `MONTANT_TTC|${order.total_price || '0.00'}`,
-    `DEVISE|${order.currency || 'EUR'}`,
-    `MODE_PAIEMENT|${order.payment_gateway_names?.join(',') || 'CB'}`,
+    `MONTANT_TVA|${order.total_tax || '0.00'}`,
+    `POURCENTAGE_REMISE|${discountPercentage}`,
     `TRANSACTION_CB|${transactionId}`,
-    // Informations de facturation (si différentes de livraison)
-    `FACT_NOM|${billing.last_name || shipping.last_name || ''}`,
-    `FACT_PRENOM|${billing.first_name || shipping.first_name || ''}`,
-    `FACT_ADRESSE|${billing.address1 || shipping.address1 || ''}`,
-    `FACT_CP|${billing.zip || shipping.zip || ''}`,
-    `FACT_VILLE|${billing.city || shipping.city || ''}`,
-    `FACT_PAYS|${billing.country_code || shipping.country_code || 'FR'}`,
-    // Notes et commentaires
-    `NOTE_CLIENT|${sanitizeText(order.note || '')}`,
   ];
 
+  // Ajouter l'adresse de facturation seulement si différente
+  if (isBillingDifferent) {
+    headerLines.push(
+      `FACT_NOM|${billing.last_name || ''}`,
+      `FACT_PRENOM|${billing.first_name || ''}`,
+      `FACT_ADRESSE|${billing.address1 || ''}`,
+      `FACT_CP|${billing.zip || ''}`,
+      `FACT_VILLE|${billing.city || ''}`,
+      `FACT_PAYS|${billing.country_code || 'FR'}`
+    );
+  }
+
   // ============================================
-  // Construire la section LIGNES
+  // Construire la section LIGNES (selon specs client)
   // ============================================
-  const itemLines = ['LIGNES', 'SKU|DESIGNATION|QTE|PRIX_UNITAIRE_HT|PRIX_UNITAIRE_TTC|REMISE'];
+  const itemLines = ['LIGNES', 'REF_ARTICLE|DESIGNATION|QTE'];
 
   // Parcourir les articles de la commande
   for (const item of order.line_items || []) {
-    // Calculer le prix HT si nécessaire (Shopify fournit généralement le TTC)
-    // Note: Le taux de TVA dépend du produit, ici on utilise 20% par défaut
-    const priceTTC = parseFloat(item.price) || 0;
-    const taxRate = 0.20; // TODO: À adapter selon le type de produit
-    const priceHT = (priceTTC / (1 + taxRate)).toFixed(2);
-
-    // Calculer la remise totale sur la ligne
-    const discount = item.total_discount || '0.00';
-
-    // Construire la ligne article
     const itemLine = [
       item.sku || item.variant_id || '',
       sanitizeText(item.title || item.name || ''),
       item.quantity || 1,
-      priceHT,
-      priceTTC.toFixed(2),
-      discount,
     ].join('|');
 
     itemLines.push(itemLine);
@@ -298,7 +285,7 @@ async function generateTestOrderFile() {
   // Données mockées ressemblant à une vraie commande Shopify
   const mockOrder = {
     id: 5123456789,
-    name: '#TEST-001',
+    name: 'SH1-1001',
     order_number: 1001,
     email: 'client.test@example.com',
     created_at: new Date().toISOString(),
@@ -306,19 +293,16 @@ async function generateTestOrderFile() {
     total_price: '89.90',
     subtotal_price: '74.92',
     total_tax: '14.98',
+    total_discounts: '10.00', // Remise globale de 10€
     checkout_token: 'test_checkout_' + uuidv4().substring(0, 8),
     payment_gateway_names: ['shopify_payments'],
-    note: 'Commande de test générée automatiquement',
 
     shipping_address: {
       first_name: 'Jean',
       last_name: 'Dupont',
-      company: 'Ophtalmic SARL',
       address1: '123 Rue de la République',
-      address2: 'Bâtiment A',
       city: 'Paris',
       zip: '75001',
-      province: 'Île-de-France',
       country_code: 'FR',
       phone: '+33 1 23 45 67 89',
     },
@@ -345,8 +329,6 @@ async function generateTestOrderFile() {
         sku: 'HYDRO-LARMES-001',
         title: 'Hydrofeel Larmes Artificielles - 10ml',
         quantity: 2,
-        price: '29.90',
-        total_discount: '0.00',
         variant_id: 98765,
       },
       {
@@ -354,8 +336,6 @@ async function generateTestOrderFile() {
         sku: 'LENS-CLEAN-002',
         title: 'Solution Nettoyante Lentilles - 360ml',
         quantity: 1,
-        price: '24.10',
-        total_discount: '5.00',
         variant_id: 98766,
       },
     ],
