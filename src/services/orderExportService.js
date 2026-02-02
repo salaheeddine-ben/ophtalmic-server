@@ -71,40 +71,40 @@ function generateOrderFileContent(order) {
   // ============================================
   const headerLines = [
     'ENTETE',
-    `REF_COMMANDE|${order.name || order.order_number}`,
-    `REF_CLIENT|0147907400`,
-    `DATE_COMMANDE|${orderDate}`,
-    `EMAIL_CLIENT|${order.email || ''}`,
-    `TELEPHONE|${shipping.phone || billing.phone || ''}`,
-    `NOM|${shipping.last_name || ''}`,
-    `PRENOM|${shipping.first_name || ''}`,
-    `ADRESSE_LIVRAISON|${shipping.address1 || ''}`,
-    `CP_LIVRAISON|${shipping.zip || ''}`,
-    `VILLE_LIVRAISON|${shipping.city || ''}`,
-    `PAYS_LIVRAISON|${shipping.country_code || 'FR'}`,
-    `FRAIS_PORT|${shippingPrice}`,
-    `MONTANT_TTC|${order.total_price || '0.00'}`,
-    `MONTANT_TVA|${order.total_tax || '0.00'}`,
-    `POURCENTAGE_REMISE|${discountPercentage}`,
-    `TRANSACTION_CB|${transactionId}`,
+    order.name || order.order_number,
+    '0147907400',
+    orderDate,
+    order.email || '',
+    shipping.phone || billing.phone || '',
+    shipping.last_name || '',
+    shipping.first_name || '',
+    shipping.address1 || '',
+    shipping.zip || '',
+    shipping.city || '',
+    shipping.country_code || 'FR',
+    shippingPrice,
+    order.total_price || '0.00',
+    order.total_tax || '0.00',
+    discountPercentage,
+    transactionId,
   ];
 
   // Ajouter l'adresse de facturation seulement si différente
   if (isBillingDifferent) {
     headerLines.push(
-      `FACT_NOM|${billing.last_name || ''}`,
-      `FACT_PRENOM|${billing.first_name || ''}`,
-      `FACT_ADRESSE|${billing.address1 || ''}`,
-      `FACT_CP|${billing.zip || ''}`,
-      `FACT_VILLE|${billing.city || ''}`,
-      `FACT_PAYS|${billing.country_code || 'FR'}`
+      billing.last_name || '',
+      billing.first_name || '',
+      billing.address1 || '',
+      billing.zip || '',
+      billing.city || '',
+      billing.country_code || 'FR'
     );
   }
 
   // ============================================
   // Construire la section LIGNES (selon specs client)
   // ============================================
-  const itemLines = ['LIGNES', 'REF_ARTICLE|DESIGNATION|QTE'];
+  const itemLines = ['LIGNES'];
 
   // Parcourir les articles de la commande
   for (const item of order.line_items || []) {
