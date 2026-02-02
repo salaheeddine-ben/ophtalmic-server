@@ -468,6 +468,53 @@ router.post(
 );
 
 /**
+ * GET /test/sftp-file/:filename
+ *
+ * Lit le contenu d'un fichier distant sur le serveur SFTP.
+ *
+ * @route GET /test/sftp-file/:filename
+ * @param {string} filename - Nom du fichier à lire
+ * @param {string} [query.download] - Si 'true', télécharge le fichier
+ */
+router.get(
+  '/sftp-file/:filename',
+  asyncHandler(async (req, res) => {
+    const { filename } = req.params;
+    const remoteDir = req.query.dir || config.sftp.remoteDir;
+
+    log.info('Lecture fichier SFTP distant', { filename, remoteDir });
+
+    try {
+      const content = await sftpService.downloadFile(filename, remoteDir);
+
+      if (req.query.download === 'true') {
+        res.setHeader('Content-Type', 'text/plain');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        return res.send(content);
+      }
+
+      res.json({
+        success: true,
+        filename,
+        remotePath: `${remoteDir}${filename}`,
+        content: content.toString('utf-8'),
+        size: content.length,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      log.error('Erreur lecture fichier SFTP', { filename, error: error.message });
+
+      res.status(404).json({
+        success: false,
+        message: 'Fichier non trouvé sur le serveur SFTP',
+        filename,
+        error: error.message,
+      });
+    }
+  })
+);
+
+/**
  * GET /test/config
  *
  * Affiche la configuration actuelle (sans les secrets).
