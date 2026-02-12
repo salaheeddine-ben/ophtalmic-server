@@ -53,18 +53,14 @@ function generateOrderFileContent(order) {
   // Formater la date au format AAAA-MM-JJ
   const orderDate = new Date(order.created_at).toISOString().split('T')[0];
 
-  // Calculer le pourcentage de remise global
-  const totalDiscount = parseFloat(order.total_discounts) || 0;
-  const subtotalBeforeDiscount = (parseFloat(order.subtotal_price) || 0) + totalDiscount;
-  const discountPercentage = subtotalBeforeDiscount > 0
-    ? ((totalDiscount / subtotalBeforeDiscount) * 100).toFixed(2)
-    : '0';
-
   // Vérifier si l'adresse de facturation est différente de la livraison
   const isBillingDifferent =
     billing.address1 !== shipping.address1 ||
     billing.city !== shipping.city ||
     billing.zip !== shipping.zip;
+
+  // Récupérer le téléphone (obligatoire selon le client)
+  const phoneNumber = shipping.phone || billing.phone || order.phone || '';
 
   // ============================================
   // Construire la section ENTETE (selon specs client)
@@ -75,7 +71,7 @@ function generateOrderFileContent(order) {
     '0147907400',
     orderDate,
     order.email || '',
-    shipping.phone || billing.phone || '',
+    phoneNumber,
     shipping.last_name || '',
     shipping.first_name || '',
     shipping.address1 || '',
@@ -85,7 +81,6 @@ function generateOrderFileContent(order) {
     shippingPrice,
     order.total_price || '0.00',
     order.total_tax || '0.00',
-    discountPercentage,
     transactionId,
   ];
 
@@ -103,15 +98,32 @@ function generateOrderFileContent(order) {
 
   // ============================================
   // Construire la section LIGNES (selon specs client)
+  // Avec: SKU, Désignation, Qté, Prix Unitaire HT, Remise par ligne
   // ============================================
   const itemLines = ['LIGNES'];
 
   // Parcourir les articles de la commande
   for (const item of order.line_items || []) {
+    // Prix TTC unitaire
+    const priceTTC = parseFloat(item.price) || 0;
+
+    // Calculer le prix HT (TVA à 20%)
+    const taxRate = 0.20;
+    const priceHT = (priceTTC / (1 + taxRate)).toFixed(2);
+
+    // Remise par ligne (montant ou pourcentage selon ce que Shopify fournit)
+    const lineDiscount = parseFloat(item.total_discount) || 0;
+    const lineTotal = priceTTC * (item.quantity || 1);
+    const discountPercentage = lineTotal > 0
+      ? ((lineDiscount / lineTotal) * 100).toFixed(2)
+      : '0';
+
     const itemLine = [
       item.sku || item.variant_id || '',
       sanitizeText(item.title || item.name || ''),
       item.quantity || 1,
+      priceHT,
+      discountPercentage,
     ].join('|');
 
     itemLines.push(itemLine);
@@ -329,6 +341,8 @@ async function generateTestOrderFile() {
         sku: 'HYDRO-LARMES-001',
         title: 'Hydrofeel Larmes Artificielles - 10ml',
         quantity: 2,
+        price: '29.90',
+        total_discount: '5.00',
         variant_id: 98765,
       },
       {
@@ -336,6 +350,8 @@ async function generateTestOrderFile() {
         sku: 'LENS-CLEAN-002',
         title: 'Solution Nettoyante Lentilles - 360ml',
         quantity: 1,
+        price: '24.10',
+        total_discount: '0.00',
         variant_id: 98766,
       },
     ],
