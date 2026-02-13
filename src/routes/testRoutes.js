@@ -556,6 +556,309 @@ router.get(
 );
 
 /**
+ * GET /test/sftp-browser
+ *
+ * Interface HTML pour naviguer et télécharger les fichiers SFTP.
+ * Affiche une page web avec la liste des fichiers et des boutons de téléchargement.
+ *
+ * @route GET /test/sftp-browser
+ */
+router.get(
+  '/sftp-browser',
+  asyncHandler(async (req, res) => {
+    const remoteDir = req.query.dir || config.sftp.remoteDir;
+
+    log.info('Affichage du navigateur SFTP', { remoteDir });
+
+    let files = [];
+    let connectionError = null;
+
+    try {
+      // Tester la connexion et lister les fichiers
+      const connectionTest = await sftpService.testConnection();
+
+      if (connectionTest.success) {
+        files = await sftpService.listFiles(remoteDir);
+        // Trier par date de modification (plus récent en premier)
+        files.sort((a, b) => new Date(b.modifyTime) - new Date(a.modifyTime));
+      } else {
+        connectionError = connectionTest.error || 'Connexion SFTP échouée';
+      }
+    } catch (error) {
+      connectionError = error.message;
+    }
+
+    // Générer la page HTML
+    const html = generateSftpBrowserHtml(files, remoteDir, connectionError);
+    res.send(html);
+  })
+);
+
+/**
+ * Génère la page HTML du navigateur SFTP
+ */
+function generateSftpBrowserHtml(files, remoteDir, error) {
+  const formatSize = (bytes) => {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  };
+
+  const formatDate = (timestamp) => {
+    if (!timestamp) return '-';
+    const date = new Date(timestamp);
+    return date.toLocaleString('fr-FR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  };
+
+  const filesHtml = error
+    ? `<div class="error-box">❌ Erreur de connexion SFTP: ${error}</div>`
+    : files.length === 0
+      ? '<div class="empty-box">📂 Aucun fichier dans ce dossier</div>'
+      : `
+        <table class="files-table">
+          <thead>
+            <tr>
+              <th>📄 Nom du fichier</th>
+              <th>📏 Taille</th>
+              <th>📅 Date de modification</th>
+              <th>⚡ Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${files.map(file => `
+              <tr>
+                <td class="filename">${file.name}</td>
+                <td class="size">${formatSize(file.size)}</td>
+                <td class="date">${formatDate(file.modifyTime)}</td>
+                <td class="actions">
+                  <a href="/test/sftp-file/${encodeURIComponent(file.name)}?download=true" class="btn btn-download" title="Télécharger">
+                    ⬇️ Télécharger
+                  </a>
+                  <a href="/test/sftp-file/${encodeURIComponent(file.name)}" class="btn btn-view" title="Voir le contenu" target="_blank">
+                    👁️ Voir
+                  </a>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+
+  return `
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SFTP Browser - Ophtalmic Gateway</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      color: #eee;
+      padding: 20px;
+      margin: 0;
+      min-height: 100vh;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    h1 {
+      color: #fff;
+      border-bottom: 2px solid #4a90d9;
+      padding-bottom: 15px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .info-box {
+      background: #16213e;
+      border-radius: 8px;
+      padding: 15px 20px;
+      margin-bottom: 20px;
+      border-left: 4px solid #4a90d9;
+    }
+    .info-box strong {
+      color: #4a90d9;
+    }
+    .error-box {
+      background: #3d1a1a;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 20px 0;
+      border-left: 4px solid #dc3545;
+      color: #ff6b6b;
+    }
+    .empty-box {
+      background: #1a2a3e;
+      border-radius: 8px;
+      padding: 40px;
+      text-align: center;
+      color: #888;
+      font-size: 18px;
+    }
+    .files-table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #16213e;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    }
+    .files-table th {
+      background: #0f3460;
+      padding: 15px;
+      text-align: left;
+      font-weight: 600;
+      color: #4a90d9;
+      border-bottom: 2px solid #4a90d9;
+    }
+    .files-table td {
+      padding: 12px 15px;
+      border-bottom: 1px solid #2a2a4a;
+    }
+    .files-table tr:hover {
+      background: #1a2a4e;
+    }
+    .files-table tr:last-child td {
+      border-bottom: none;
+    }
+    .filename {
+      font-family: 'Courier New', monospace;
+      color: #7ec8e3;
+      font-weight: 500;
+    }
+    .size {
+      color: #888;
+      font-size: 14px;
+    }
+    .date {
+      color: #888;
+      font-size: 14px;
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 8px 12px;
+      border-radius: 5px;
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.2s ease;
+    }
+    .btn-download {
+      background: #28a745;
+      color: white;
+    }
+    .btn-download:hover {
+      background: #218838;
+      transform: translateY(-1px);
+    }
+    .btn-view {
+      background: #4a90d9;
+      color: white;
+    }
+    .btn-view:hover {
+      background: #357abd;
+      transform: translateY(-1px);
+    }
+    .refresh-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 20px;
+      background: #4a90d9;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      font-size: 14px;
+      cursor: pointer;
+      text-decoration: none;
+      margin-bottom: 20px;
+      transition: background 0.2s;
+    }
+    .refresh-btn:hover {
+      background: #357abd;
+    }
+    .stats {
+      display: flex;
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+    .stat-card {
+      background: #16213e;
+      padding: 15px 25px;
+      border-radius: 8px;
+      text-align: center;
+    }
+    .stat-value {
+      font-size: 28px;
+      font-weight: bold;
+      color: #4a90d9;
+    }
+    .stat-label {
+      font-size: 12px;
+      color: #888;
+      text-transform: uppercase;
+    }
+    .footer {
+      text-align: center;
+      color: #666;
+      margin-top: 40px;
+      padding-top: 20px;
+      border-top: 1px solid #2a2a4a;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>📁 SFTP Browser - Ophtalmic Gateway</h1>
+
+    <div class="info-box">
+      <strong>📂 Dossier distant:</strong> ${remoteDir}<br>
+      <strong>🖥️ Serveur:</strong> ${config.sftp.host}:${config.sftp.port}
+    </div>
+
+    <a href="/test/sftp-browser" class="refresh-btn">🔄 Rafraîchir</a>
+
+    <div class="stats">
+      <div class="stat-card">
+        <div class="stat-value">${files.length}</div>
+        <div class="stat-label">Fichiers</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">${formatSize(files.reduce((sum, f) => sum + (f.size || 0), 0))}</div>
+        <div class="stat-label">Taille totale</div>
+      </div>
+    </div>
+
+    ${filesHtml}
+
+    <div class="footer">
+      Ophtalmic Gateway Server - SFTP Browser<br>
+      Dernière actualisation: ${new Date().toLocaleString('fr-FR')}
+    </div>
+  </div>
+</body>
+</html>
+  `;
+}
+
+/**
  * GET /test/config
  *
  * Affiche la configuration actuelle (sans les secrets).
