@@ -25,8 +25,10 @@ const log = createModuleLogger('orderExportService');
  * Génère le contenu du fichier TXT à partir d'une commande Shopify
  *
  * Format du fichier selon les specs client Ophtalmic :
- * - Section ENTETE avec les informations essentielles
+ * - Section ENTETE avec les informations essentielles (SANS remise globale)
  * - Section LIGNES avec le détail des articles
+ *
+ * IMPORTANT: Toujours mettre 0 pour les champs vides (ne pas laisser vide)
  *
  * @param {Object} order - Commande Shopify (données du webhook)
  * @returns {string} Contenu formaté du fichier TXT
@@ -41,14 +43,14 @@ function generateOrderFileContent(order) {
   const shipping = order.shipping_address || {};
   const billing = order.billing_address || shipping;
 
-  // Calcul des frais de port
-  const shippingPrice = order.shipping_lines?.[0]?.price || '0.00';
+  // Calcul des frais de port (mettre 0 si pas de frais)
+  const shippingPrice = parseFloat(order.shipping_lines?.[0]?.price) || 0;
 
   // Récupérer l'identifiant de transaction de paiement
   const transactionId = order.checkout_token
     || order.payment_gateway_names?.[0]
     || order.id?.toString()
-    || '';
+    || '0';
 
   // Formater la date au format AAAA-MM-JJ
   const orderDate = new Date(order.created_at).toISOString().split('T')[0];
@@ -59,46 +61,89 @@ function generateOrderFileContent(order) {
     billing.city !== shipping.city ||
     billing.zip !== shipping.zip;
 
-  // Récupérer le téléphone (obligatoire selon le client)
-  const phoneNumber = shipping.phone || billing.phone || order.phone || '';
+  // Récupérer le téléphone (obligatoire selon le client - mettre 0 si absent)
+  const phoneNumber = shipping.phone || billing.phone || order.phone || '0';
+
+  // ============================================
+  // Calculer le montant TTC correctement
+  // TTC = somme des (prix unitaire TTC * quantité - remise) + frais de port
+  // ============================================
+  let calculatedTTC = 0;
+  let calculatedTVA = 0;
+  const taxRate = 0.20;
+
+  for (const item of order.line_items || []) {
+    const priceTTC = parseFloat(item.price) || 0;
+    const quantity = parseInt(item.quantity) || 1;
+    const lineDiscount = parseFloat(item.total_discount) || 0;
+
+    // Total ligne TTC après remise
+    const lineTotalTTC = (priceTTC * quantity) - lineDiscount;
+    calculatedTTC += lineTotalTTC;
+
+    // TVA sur cette ligne (TVA = TTC - HT, où HT = TTC / 1.20)
+    const lineTotalHT = lineTotalTTC / (1 + taxRate);
+    calculatedTVA += (lineTotalTTC - lineTotalHT);
+  }
+
+  // Ajouter les frais de port au TTC
+  calculatedTTC += shippingPrice;
+
+  // TVA sur les frais de port (si applicable)
+  const shippingHT = shippingPrice / (1 + taxRate);
+  calculatedTVA += (shippingPrice - shippingHT);
+
+  // Formater les montants avec 2 décimales
+  const totalTTC = calculatedTTC.toFixed(2);
+  const totalTVA = calculatedTVA.toFixed(2);
+
+  log.debug('Calcul TTC', {
+    calculatedTTC: totalTTC,
+    calculatedTVA: totalTVA,
+    shippingPrice: shippingPrice.toFixed(2),
+    shopifyTotalPrice: order.total_price,
+    shopifyTotalTax: order.total_tax,
+  });
 
   // ============================================
   // Construire la section ENTETE (selon specs client)
+  // NOTE: PAS de remise globale dans l'entête
   // ============================================
   const headerLines = [
     'ENTETE',
-    order.name || order.order_number,
+    order.name || order.order_number || '0',
     '0147907400',
     orderDate,
-    order.email || '',
+    order.email || '0',
     phoneNumber,
-    shipping.last_name || '',
-    shipping.first_name || '',
-    shipping.address1 || '',
-    shipping.zip || '',
-    shipping.city || '',
+    shipping.last_name || '0',
+    shipping.first_name || '0',
+    shipping.address1 || '0',
+    shipping.zip || '0',
+    shipping.city || '0',
     shipping.country_code || 'FR',
-    shippingPrice,
-    order.total_price || '0.00',
-    order.total_tax || '0.00',
+    shippingPrice.toFixed(2),
+    totalTTC,
+    totalTVA,
     transactionId,
   ];
 
   // Ajouter l'adresse de facturation seulement si différente
   if (isBillingDifferent) {
     headerLines.push(
-      billing.last_name || '',
-      billing.first_name || '',
-      billing.address1 || '',
-      billing.zip || '',
-      billing.city || '',
+      billing.last_name || '0',
+      billing.first_name || '0',
+      billing.address1 || '0',
+      billing.zip || '0',
+      billing.city || '0',
       billing.country_code || 'FR'
     );
   }
 
   // ============================================
   // Construire la section LIGNES (selon specs client)
-  // Avec: SKU, Désignation, Qté, Prix Unitaire HT, Remise par ligne
+  // Avec: SKU, Désignation, Qté, Prix Unitaire HT, Remise par ligne (%)
+  // IMPORTANT: Toujours mettre 0 si pas de valeur
   // ============================================
   const itemLines = ['LIGNES'];
 
@@ -108,20 +153,22 @@ function generateOrderFileContent(order) {
     const priceTTC = parseFloat(item.price) || 0;
 
     // Calculer le prix HT (TVA à 20%)
-    const taxRate = 0.20;
     const priceHT = (priceTTC / (1 + taxRate)).toFixed(2);
 
-    // Remise par ligne (montant ou pourcentage selon ce que Shopify fournit)
+    // Remise par ligne en pourcentage
     const lineDiscount = parseFloat(item.total_discount) || 0;
-    const lineTotal = priceTTC * (item.quantity || 1);
-    const discountPercentage = lineTotal > 0
+    const quantity = parseInt(item.quantity) || 1;
+    const lineTotal = priceTTC * quantity;
+
+    // Calculer le pourcentage de remise (0 si pas de remise)
+    const discountPercentage = lineTotal > 0 && lineDiscount > 0
       ? ((lineDiscount / lineTotal) * 100).toFixed(2)
       : '0';
 
     const itemLine = [
-      item.sku || item.variant_id || '',
-      sanitizeText(item.title || item.name || ''),
-      item.quantity || 1,
+      item.sku || item.variant_id || '0',
+      sanitizeText(item.title || item.name || '0'),
+      quantity,
       priceHT,
       discountPercentage,
     ].join('|');
@@ -289,26 +336,19 @@ async function saveFileLocally(content, fileName) {
  * Génère un fichier de test avec des données mockées
  * Utile pour tester le format sans vraie commande
  *
+ * @param {string} scenario - Type de scénario: 'with_discount', 'no_discount', 'multiple_items', 'minimal'
  * @returns {Promise<Object>} Résultat de l'export
  */
-async function generateTestOrderFile() {
-  log.info('Génération d\'un fichier de commande de test');
+async function generateTestOrderFile(scenario = 'with_discount') {
+  log.info('Génération d\'un fichier de commande de test', { scenario });
 
-  // Données mockées ressemblant à une vraie commande Shopify
-  const mockOrder = {
+  // Données de base pour tous les scénarios
+  const baseOrder = {
     id: 5123456789,
-    name: 'SH1-1001',
-    order_number: 1001,
-    email: 'client.test@example.com',
     created_at: new Date().toISOString(),
     currency: 'EUR',
-    total_price: '89.90',
-    subtotal_price: '74.92',
-    total_tax: '14.98',
-    total_discounts: '10.00', // Remise globale de 10€
     checkout_token: 'test_checkout_' + uuidv4().substring(0, 8),
     payment_gateway_names: ['shopify_payments'],
-
     shipping_address: {
       first_name: 'Jean',
       last_name: 'Dupont',
@@ -318,7 +358,6 @@ async function generateTestOrderFile() {
       country_code: 'FR',
       phone: '+33 1 23 45 67 89',
     },
-
     billing_address: {
       first_name: 'Jean',
       last_name: 'Dupont',
@@ -327,35 +366,6 @@ async function generateTestOrderFile() {
       zip: '75001',
       country_code: 'FR',
     },
-
-    shipping_lines: [
-      {
-        title: 'Livraison Standard',
-        price: '5.90',
-      },
-    ],
-
-    line_items: [
-      {
-        id: 12345,
-        sku: 'HYDRO-LARMES-001',
-        title: 'Hydrofeel Larmes Artificielles - 10ml',
-        quantity: 2,
-        price: '29.90',
-        total_discount: '5.00',
-        variant_id: 98765,
-      },
-      {
-        id: 12346,
-        sku: 'LENS-CLEAN-002',
-        title: 'Solution Nettoyante Lentilles - 360ml',
-        quantity: 1,
-        price: '24.10',
-        total_discount: '0.00',
-        variant_id: 98766,
-      },
-    ],
-
     customer: {
       id: 9876543210,
       email: 'client.test@example.com',
@@ -363,6 +373,142 @@ async function generateTestOrderFile() {
       last_name: 'Dupont',
     },
   };
+
+  let mockOrder;
+
+  switch (scenario) {
+    case 'no_discount':
+      // Cas 1: Commande SANS remise
+      mockOrder = {
+        ...baseOrder,
+        name: 'SH1-TEST-SANS-REMISE',
+        order_number: 2001,
+        email: 'client.test@example.com',
+        total_price: '89.90',
+        subtotal_price: '84.00',
+        total_tax: '16.80',
+        total_discounts: '0.00',
+        shipping_lines: [{ title: 'Livraison Standard', price: '5.90' }],
+        line_items: [
+          {
+            id: 12345,
+            sku: 'LENS-DAILY-001',
+            title: 'Lentilles journalières - Boîte de 30',
+            quantity: 2,
+            price: '42.00',
+            total_discount: '0', // PAS de remise
+            variant_id: 98765,
+          },
+        ],
+      };
+      break;
+
+    case 'multiple_items':
+      // Cas 2: Commande avec PLUSIEURS articles et remises variées
+      mockOrder = {
+        ...baseOrder,
+        name: 'SH1-TEST-MULTI-ARTICLES',
+        order_number: 2002,
+        email: 'client.multi@example.com',
+        total_price: '156.70',
+        subtotal_price: '150.80',
+        total_tax: '30.16',
+        total_discounts: '15.00',
+        shipping_lines: [{ title: 'Livraison Express', price: '9.90' }],
+        line_items: [
+          {
+            id: 12345,
+            sku: 'HYDRO-LARMES-001',
+            title: 'Hydrofeel Larmes Artificielles - 10ml',
+            quantity: 2,
+            price: '29.90',
+            total_discount: '10.00', // Remise de 10€
+            variant_id: 98765,
+          },
+          {
+            id: 12346,
+            sku: 'LENS-CLEAN-002',
+            title: 'Solution Nettoyante Lentilles - 360ml',
+            quantity: 1,
+            price: '24.10',
+            total_discount: '0', // PAS de remise
+            variant_id: 98766,
+          },
+          {
+            id: 12347,
+            sku: 'LENS-MONTHLY-003',
+            title: 'Lentilles mensuelles - Pack 6 mois',
+            quantity: 1,
+            price: '89.90',
+            total_discount: '5.00', // Remise de 5€
+            variant_id: 98767,
+          },
+        ],
+      };
+      break;
+
+    case 'minimal':
+      // Cas 3: Commande minimale (1 article, pas de remise, valeurs minimales)
+      mockOrder = {
+        ...baseOrder,
+        name: 'SH1-TEST-MINIMAL',
+        order_number: 2003,
+        email: 'minimal@example.com',
+        total_price: '19.90',
+        subtotal_price: '14.00',
+        total_tax: '2.80',
+        total_discounts: '0.00',
+        shipping_lines: [{ title: 'Livraison Standard', price: '5.90' }],
+        line_items: [
+          {
+            id: 12348,
+            sku: 'SAMPLE-001',
+            title: 'Échantillon produit',
+            quantity: 1,
+            price: '14.00',
+            total_discount: '0',
+            variant_id: 98768,
+          },
+        ],
+      };
+      break;
+
+    case 'with_discount':
+    default:
+      // Cas par défaut: Commande AVEC remise
+      mockOrder = {
+        ...baseOrder,
+        name: 'SH1-TEST-AVEC-REMISE',
+        order_number: 2000,
+        email: 'client.test@example.com',
+        total_price: '89.90',
+        subtotal_price: '74.92',
+        total_tax: '14.98',
+        total_discounts: '10.00',
+        shipping_lines: [{ title: 'Livraison Standard', price: '5.90' }],
+        line_items: [
+          {
+            id: 12345,
+            sku: 'HYDRO-LARMES-001',
+            title: 'Hydrofeel Larmes Artificielles - 10ml',
+            quantity: 2,
+            price: '29.90',
+            total_discount: '5.00', // Remise de 5€ sur cette ligne
+            variant_id: 98765,
+          },
+          {
+            id: 12346,
+            sku: 'LENS-CLEAN-002',
+            title: 'Solution Nettoyante Lentilles - 360ml',
+            quantity: 1,
+            price: '24.10',
+            total_discount: '5.00', // Remise de 5€ sur cette ligne
+            variant_id: 98766,
+          },
+        ],
+      };
+      break;
+  }
 
   // Forcer le mode test pour cette génération
   const originalTestMode = config.test.testMode;
@@ -373,17 +519,56 @@ async function generateTestOrderFile() {
 
     return {
       ...result,
-      message: 'Fichier de test généré avec succès',
+      scenario,
+      message: `Fichier de test généré avec succès (scénario: ${scenario})`,
       mockOrder: {
         name: mockOrder.name,
         itemCount: mockOrder.line_items.length,
         totalPrice: mockOrder.total_price,
+        totalDiscounts: mockOrder.total_discounts,
       },
     };
   } finally {
     // Restaurer le mode original
     config.test.testMode = originalTestMode;
   }
+}
+
+/**
+ * Génère TOUS les cas de test d'un coup
+ * Utile pour fournir plusieurs exemples au client
+ *
+ * @returns {Promise<Object>} Résultats de tous les exports
+ */
+async function generateAllTestCases() {
+  log.info('Génération de tous les cas de test');
+
+  const scenarios = ['with_discount', 'no_discount', 'multiple_items', 'minimal'];
+  const results = [];
+
+  for (const scenario of scenarios) {
+    try {
+      const result = await generateTestOrderFile(scenario);
+      results.push(result);
+    } catch (error) {
+      log.error('Erreur lors de la génération du cas de test', {
+        scenario,
+        error: error.message,
+      });
+      results.push({
+        scenario,
+        success: false,
+        error: error.message,
+      });
+    }
+  }
+
+  return {
+    success: true,
+    totalGenerated: results.filter((r) => r.success).length,
+    totalFailed: results.filter((r) => !r.success).length,
+    results,
+  };
 }
 
 /**
@@ -457,6 +642,7 @@ module.exports = {
   generateOrderFileContent,
   generateFileName,
   generateTestOrderFile,
+  generateAllTestCases,
   readLocalOrderFile,
   listLocalOrderFiles,
   saveFileLocally,

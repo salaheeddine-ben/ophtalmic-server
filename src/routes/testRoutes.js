@@ -143,15 +143,18 @@ router.get(
  * Le fichier est sauvegardé localement (mode test forcé).
  *
  * @route POST /test/generate-order-file
+ * @param {string} [query.scenario] - Scénario: 'with_discount', 'no_discount', 'multiple_items', 'minimal'
  * @returns {Object} Informations sur le fichier généré
  */
 router.post(
   '/generate-order-file',
   asyncHandler(async (req, res) => {
-    log.info('Génération d\'un fichier de commande de test');
+    const scenario = req.query.scenario || 'with_discount';
+
+    log.info('Génération d\'un fichier de commande de test', { scenario });
 
     try {
-      const result = await orderExportService.generateTestOrderFile();
+      const result = await orderExportService.generateTestOrderFile(scenario);
 
       res.json({
         success: true,
@@ -162,11 +165,49 @@ router.post(
     } catch (error) {
       log.error('Erreur lors de la génération du fichier test', {
         error: error.message,
+        scenario,
       });
 
       res.status(500).json({
         success: false,
         message: 'Erreur lors de la génération du fichier',
+        error: error.message,
+      });
+    }
+  })
+);
+
+/**
+ * POST /test/generate-all-test-cases
+ *
+ * Génère TOUS les cas de test d'un coup (avec remise, sans remise, multi-articles, minimal).
+ * Les fichiers sont sauvegardés localement (mode test forcé).
+ *
+ * @route POST /test/generate-all-test-cases
+ * @returns {Object} Informations sur tous les fichiers générés
+ */
+router.post(
+  '/generate-all-test-cases',
+  asyncHandler(async (req, res) => {
+    log.info('Génération de tous les cas de test');
+
+    try {
+      const result = await orderExportService.generateAllTestCases();
+
+      res.json({
+        success: true,
+        message: 'Tous les cas de test ont été générés',
+        ...result,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      log.error('Erreur lors de la génération des cas de test', {
+        error: error.message,
+      });
+
+      res.status(500).json({
+        success: false,
+        message: 'Erreur lors de la génération des fichiers',
         error: error.message,
       });
     }
