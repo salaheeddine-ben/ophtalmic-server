@@ -65,44 +65,16 @@ function generateOrderFileContent(order) {
   const phoneNumber = shipping.phone || billing.phone || order.phone || '0';
 
   // ============================================
-  // Calculer le montant TTC correctement
-  // TTC = somme des (prix unitaire TTC * quantité - remise) + frais de port
+  // Récupérer les montants directement de Shopify (pas de calcul)
   // ============================================
-  let calculatedTTC = 0;
-  let calculatedTVA = 0;
   const taxRate = 0.20;
+  const totalTTC = parseFloat(order.total_price) || 0;
+  const totalTVA = parseFloat(order.total_tax) || 0;
 
-  for (const item of order.line_items || []) {
-    const priceTTC = parseFloat(item.price) || 0;
-    const quantity = parseInt(item.quantity) || 1;
-    const lineDiscount = parseFloat(item.total_discount) || 0;
-
-    // Total ligne TTC après remise
-    const lineTotalTTC = (priceTTC * quantity) - lineDiscount;
-    calculatedTTC += lineTotalTTC;
-
-    // TVA sur cette ligne (TVA = TTC - HT, où HT = TTC / 1.20)
-    const lineTotalHT = lineTotalTTC / (1 + taxRate);
-    calculatedTVA += (lineTotalTTC - lineTotalHT);
-  }
-
-  // Ajouter les frais de port au TTC
-  calculatedTTC += shippingPrice;
-
-  // TVA sur les frais de port (si applicable)
-  const shippingHT = shippingPrice / (1 + taxRate);
-  calculatedTVA += (shippingPrice - shippingHT);
-
-  // Formater les montants avec 2 décimales
-  const totalTTC = calculatedTTC.toFixed(2);
-  const totalTVA = calculatedTVA.toFixed(2);
-
-  log.debug('Calcul TTC', {
-    calculatedTTC: totalTTC,
-    calculatedTVA: totalTVA,
+  log.debug('Montants Shopify', {
+    totalTTC: totalTTC.toFixed(2),
+    totalTVA: totalTVA.toFixed(2),
     shippingPrice: shippingPrice.toFixed(2),
-    shopifyTotalPrice: order.total_price,
-    shopifyTotalTax: order.total_tax,
   });
 
   // ============================================
@@ -123,8 +95,8 @@ function generateOrderFileContent(order) {
     shipping.city || '0',
     shipping.country_code || 'FR',
     shippingPrice.toFixed(2),
-    totalTTC,
-    totalTVA,
+    totalTTC.toFixed(2),
+    totalTVA.toFixed(2),
     transactionId,
   ];
 
