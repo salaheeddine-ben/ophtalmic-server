@@ -127,10 +127,27 @@ function generateOrderFileContent(order) {
     // Calculer le prix HT (TVA à 20%)
     const priceHT = (priceTTC / (1 + taxRate)).toFixed(2);
 
-    // Remise par ligne en pourcentage
-    const lineDiscount = parseFloat(item.total_discount) || 0;
     const quantity = parseInt(item.quantity) || 1;
     const lineTotal = priceTTC * quantity;
+
+    // Remise par ligne : Shopify peut stocker la remise dans deux champs différents
+    // - total_discount : remise directe sur le produit
+    // - discount_allocations : tableau utilisé pour les codes promo / remises automatiques
+    let lineDiscount = parseFloat(item.total_discount) || 0;
+
+    // Si total_discount est 0, vérifier discount_allocations (codes promo, remises auto)
+    if (lineDiscount === 0 && Array.isArray(item.discount_allocations) && item.discount_allocations.length > 0) {
+      lineDiscount = item.discount_allocations.reduce((sum, alloc) => {
+        return sum + (parseFloat(alloc.amount) || 0);
+      }, 0);
+    }
+
+    log.debug('Remise ligne', {
+      sku: item.sku,
+      total_discount: item.total_discount,
+      discount_allocations: item.discount_allocations,
+      lineDiscountRetenu: lineDiscount,
+    });
 
     // Calculer le pourcentage de remise (0 si pas de remise)
     const discountPercentage = lineTotal > 0 && lineDiscount > 0

@@ -18,6 +18,7 @@ const sageX3Service = require('../services/sageX3Service');
 const shopifyService = require('../services/shopifyService');
 const sftpService = require('../services/sftpService');
 const orderExportService = require('../services/orderExportService');
+const webhookRoutes = require('./webhookRoutes');
 
 // Logger
 const log = logger;
@@ -857,6 +858,32 @@ function generateSftpBrowserHtml(files, remoteDir, error) {
 </html>
   `;
 }
+
+/**
+ * GET /test/last-webhook
+ *
+ * Affiche les données du dernier webhook orders/paid reçu.
+ * Utile pour vérifier exactement ce que Shopify envoie (remises, prix, etc.)
+ *
+ * @route GET /test/last-webhook
+ */
+router.get('/last-webhook', (req, res) => {
+  const lastOrder = webhookRoutes.getLastReceivedOrder();
+
+  if (!lastOrder) {
+    return res.json({
+      success: false,
+      message: 'Aucun webhook reçu depuis le démarrage du serveur',
+      tip: 'Faites une vraie commande Shopify ou attendez un webhook pour voir les données',
+    });
+  }
+
+  res.json({
+    success: true,
+    message: 'Dernier webhook orders/paid reçu',
+    data: lastOrder,
+  });
+});
 
 /**
  * GET /test/config

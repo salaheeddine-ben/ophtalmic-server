@@ -24,6 +24,9 @@ const log = webhookLogger;
 // Créer le router Express
 const router = express.Router();
 
+// Stockage en mémoire du dernier webhook reçu (pour debug)
+let lastReceivedOrder = null;
+
 /**
  * POST /webhook/orders/paid
  *
@@ -55,6 +58,26 @@ router.post(
       shopDomain: webhookMeta.shopDomain,
       webhookId: webhookMeta.webhookId,
     });
+
+    // Sauvegarder le dernier webhook reçu pour debug (champs remise notamment)
+    lastReceivedOrder = {
+      receivedAt: new Date().toISOString(),
+      orderName: order.name,
+      orderId: order.id,
+      total_price: order.total_price,
+      total_tax: order.total_tax,
+      total_discounts: order.total_discounts,
+      discount_codes: order.discount_codes,
+      discount_applications: order.discount_applications,
+      line_items: (order.line_items || []).map(item => ({
+        sku: item.sku,
+        title: item.title,
+        quantity: item.quantity,
+        price: item.price,
+        total_discount: item.total_discount,
+        discount_allocations: item.discount_allocations,
+      })),
+    };
 
     // ============================================
     // IMPORTANT : Répondre immédiatement à Shopify
@@ -262,4 +285,12 @@ router.get('/health', (req, res) => {
   });
 });
 
+/**
+ * Retourne le dernier webhook reçu (pour debug uniquement)
+ */
+function getLastReceivedOrder() {
+  return lastReceivedOrder;
+}
+
 module.exports = router;
+module.exports.getLastReceivedOrder = getLastReceivedOrder;
