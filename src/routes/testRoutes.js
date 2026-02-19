@@ -19,6 +19,8 @@ const shopifyService = require('../services/shopifyService');
 const sftpService = require('../services/sftpService');
 const orderExportService = require('../services/orderExportService');
 const webhookRoutes = require('./webhookRoutes');
+const orderStatusSyncService = require('../services/orderStatusSyncService');
+const statusSyncJob = require('../jobs/statusSyncJob');
 
 // Logger
 const log = logger;
@@ -561,15 +563,30 @@ router.get(
  *
  * Interface HTML pour naviguer et télécharger les fichiers SFTP.
  * Affiche une page web avec la liste des fichiers et des boutons de téléchargement.
+ * Permet de naviguer entre les dossiers /in/ et /out/.
  *
  * @route GET /test/sftp-browser
+ * @param {string} [query.dir] - Dossier à afficher: 'in', 'out', ou chemin complet
  */
 router.get(
   '/sftp-browser',
   asyncHandler(async (req, res) => {
-    const remoteDir = req.query.dir || config.sftp.remoteDir;
+    // Déterminer le dossier à afficher
+    let remoteDir = config.sftp.remoteDirIn; // Par défaut /in/
+    let activeTab = 'in';
 
-    log.info('Affichage du navigateur SFTP', { remoteDir });
+    if (req.query.dir === 'out') {
+      remoteDir = config.sftp.remoteDirOut;
+      activeTab = 'out';
+    } else if (req.query.dir === 'in') {
+      remoteDir = config.sftp.remoteDirIn;
+      activeTab = 'in';
+    } else if (req.query.dir) {
+      remoteDir = req.query.dir;
+      activeTab = 'custom';
+    }
+
+    log.info('Affichage du navigateur SFTP', { remoteDir, activeTab });
 
     let files = [];
     let connectionError = null;
@@ -589,8 +606,8 @@ router.get(
       connectionError = error.message;
     }
 
-    // Générer la page HTML
-    const html = generateSftpBrowserHtml(files, remoteDir, connectionError);
+    // Générer la page HTML avec les tabs
+    const html = generateSftpBrowserHtml(files, remoteDir, connectionError, activeTab);
     res.send(html);
   })
 );
@@ -598,7 +615,7 @@ router.get(
 /**
  * Génère la page HTML du navigateur SFTP
  */
-function generateSftpBrowserHtml(files, remoteDir, error) {
+function generateSftpBrowserHtml(files, remoteDir, error, activeTab = 'in') {
   const formatSize = (bytes) => {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
@@ -638,10 +655,10 @@ function generateSftpBrowserHtml(files, remoteDir, error) {
                 <td class="size">${formatSize(file.size)}</td>
                 <td class="date">${formatDate(file.modifyTime)}</td>
                 <td class="actions">
-                  <a href="/test/sftp-file/${encodeURIComponent(file.name)}?download=true" class="btn btn-download" title="Télécharger">
+                  <a href="/test/sftp-file/${encodeURIComponent(file.name)}?dir=${encodeURIComponent(remoteDir)}&download=true" class="btn btn-download" title="Télécharger">
                     ⬇️ Télécharger
                   </a>
-                  <a href="/test/sftp-file/${encodeURIComponent(file.name)}" class="btn btn-view" title="Voir le contenu" target="_blank">
+                  <a href="/test/sftp-file/${encodeURIComponent(file.name)}?dir=${encodeURIComponent(remoteDir)}" class="btn btn-view" title="Voir le contenu" target="_blank">
                     👁️ Voir
                   </a>
                 </td>
@@ -794,6 +811,34 @@ function generateSftpBrowserHtml(files, remoteDir, error) {
     .refresh-btn:hover {
       background: #357abd;
     }
+    .tabs {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .tab {
+      padding: 12px 24px;
+      background: #16213e;
+      border: 2px solid #2a2a4a;
+      border-radius: 8px;
+      color: #888;
+      text-decoration: none;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+    .tab:hover {
+      background: #1a2a4e;
+      border-color: #4a90d9;
+      color: #fff;
+    }
+    .tab.active {
+      background: #4a90d9;
+      border-color: #4a90d9;
+      color: white;
+    }
+    .tab-icon {
+      margin-right: 8px;
+    }
     .stats {
       display: flex;
       gap: 20px;
@@ -829,12 +874,22 @@ function generateSftpBrowserHtml(files, remoteDir, error) {
   <div class="container">
     <h1>📁 SFTP Browser - Ophtalmic Gateway</h1>
 
-    <div class="info-box">
-      <strong>📂 Dossier distant:</strong> ${remoteDir}<br>
-      <strong>🖥️ Serveur:</strong> ${config.sftp.host}:${config.sftp.port}
+    <div class="tabs">
+      <a href="/test/sftp-browser?dir=in" class="tab ${activeTab === 'in' ? 'active' : ''}">
+        <span class="tab-icon">📤</span>IN (Commandes)
+      </a>
+      <a href="/test/sftp-browser?dir=out" class="tab ${activeTab === 'out' ? 'active' : ''}">
+        <span class="tab-icon">📥</span>OUT (Statuts)
+      </a>
     </div>
 
-    <a href="/test/sftp-browser" class="refresh-btn">🔄 Rafraîchir</a>
+    <div class="info-box">
+      <strong>📂 Dossier actuel:</strong> ${remoteDir}<br>
+      <strong>🖥️ Serveur:</strong> ${config.sftp.host}:${config.sftp.port}<br>
+      <strong>📋 Description:</strong> ${activeTab === 'in' ? 'Commandes envoyées vers l\'ERP' : activeTab === 'out' ? 'Fichiers de statut reçus de l\'ERP' : 'Dossier personnalisé'}
+    </div>
+
+    <a href="/test/sftp-browser?dir=${activeTab}" class="refresh-btn">🔄 Rafraîchir</a>
 
     <div class="stats">
       <div class="stat-card">
@@ -884,6 +939,162 @@ router.get('/last-webhook', (req, res) => {
     data: lastOrder,
   });
 });
+
+/**
+ * GET /test/status-sync/preview
+ *
+ * Prévisualise les fichiers de statut dans /out/ sans les traiter.
+ * Utile pour vérifier le contenu avant de lancer la synchronisation.
+ *
+ * @route GET /test/status-sync/preview
+ */
+router.get(
+  '/status-sync/preview',
+  asyncHandler(async (req, res) => {
+    log.info('Prévisualisation des fichiers de statut');
+
+    try {
+      const result = await orderStatusSyncService.previewStatusFiles();
+
+      res.json({
+        success: true,
+        message: 'Prévisualisation des fichiers de statut',
+        ...result,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      log.error('Erreur lors de la prévisualisation', { error: error.message });
+
+      res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  })
+);
+
+/**
+ * POST /test/status-sync/run
+ *
+ * Lance manuellement la synchronisation des statuts de commandes.
+ * Lit les fichiers dans /out/, met à jour Shopify et archive les fichiers traités.
+ *
+ * @route POST /test/status-sync/run
+ */
+router.post(
+  '/status-sync/run',
+  asyncHandler(async (req, res) => {
+    log.info('Lancement manuel de la synchronisation des statuts');
+
+    try {
+      const result = await statusSyncJob.executeStatusSync();
+
+      res.json({
+        success: true,
+        message: 'Synchronisation des statuts terminée',
+        ...result,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      log.error('Erreur lors de la synchronisation', { error: error.message });
+
+      res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  })
+);
+
+/**
+ * GET /test/status-sync/stats
+ *
+ * Récupère les statistiques du job de synchronisation des statuts.
+ *
+ * @route GET /test/status-sync/stats
+ */
+router.get('/status-sync/stats', (req, res) => {
+  const stats = statusSyncJob.getStats();
+
+  res.json({
+    success: true,
+    message: 'Statistiques de synchronisation des statuts',
+    stats,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+/**
+ * GET /test/sftp/in
+ *
+ * Liste les fichiers dans le dossier /in/ (commandes envoyées).
+ *
+ * @route GET /test/sftp/in
+ */
+router.get(
+  '/sftp/in',
+  asyncHandler(async (req, res) => {
+    const remoteDir = config.sftp.remoteDirIn;
+
+    log.info('Liste des fichiers dans /in/', { remoteDir });
+
+    try {
+      const files = await sftpService.listFiles(remoteDir);
+
+      res.json({
+        success: true,
+        directory: remoteDir,
+        description: 'Commandes envoyées vers ERP',
+        fileCount: files.length,
+        files,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      log.error('Erreur liste fichiers /in/', { error: error.message });
+
+      res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  })
+);
+
+/**
+ * GET /test/sftp/out
+ *
+ * Liste les fichiers dans le dossier /out/ (statuts reçus de l'ERP).
+ *
+ * @route GET /test/sftp/out
+ */
+router.get(
+  '/sftp/out',
+  asyncHandler(async (req, res) => {
+    const remoteDir = config.sftp.remoteDirOut;
+
+    log.info('Liste des fichiers dans /out/', { remoteDir });
+
+    try {
+      const files = await sftpService.listFiles(remoteDir);
+
+      res.json({
+        success: true,
+        directory: remoteDir,
+        description: 'Fichiers de statut reçus de ERP',
+        fileCount: files.length,
+        files,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      log.error('Erreur liste fichiers /out/', { error: error.message });
+
+      res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  })
+);
 
 /**
  * GET /test/config

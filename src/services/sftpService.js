@@ -526,11 +526,72 @@ async function createDirectory(remoteDir) {
   }
 }
 
+/**
+ * Déplace/renomme un fichier sur le serveur SFTP
+ *
+ * @param {string} sourcePath - Chemin complet du fichier source
+ * @param {string} destPath - Chemin complet de destination
+ * @returns {Promise<Object>} Résultat du déplacement
+ */
+async function moveFile(sourcePath, destPath) {
+  const sftp = createSftpClient();
+
+  log.info('Déplacement de fichier SFTP', { sourcePath, destPath });
+
+  try {
+    // Connexion au serveur SFTP (avec proxy SOCKS5 si configuré)
+    await connectWithProxy(sftp);
+
+    // Vérifier si le fichier source existe
+    const fileExists = await sftp.exists(sourcePath);
+    if (!fileExists) {
+      throw new Error(`Le fichier source n'existe pas: ${sourcePath}`);
+    }
+
+    // Créer le dossier de destination si nécessaire
+    const destDir = path.posix.dirname(destPath);
+    const destDirExists = await sftp.exists(destDir);
+    if (!destDirExists) {
+      log.info('Création du dossier de destination', { destDir });
+      await sftp.mkdir(destDir, true);
+    }
+
+    // Déplacer le fichier (rename)
+    await sftp.rename(sourcePath, destPath);
+
+    log.info('Fichier déplacé avec succès', { sourcePath, destPath });
+
+    return {
+      success: true,
+      sourcePath,
+      destPath,
+      message: `Fichier déplacé de ${sourcePath} vers ${destPath}`,
+    };
+  } catch (error) {
+    log.error('Erreur lors du déplacement SFTP', {
+      error: error.message,
+      sourcePath,
+      destPath,
+    });
+
+    throw error;
+  } finally {
+    try {
+      await sftp.end();
+    } catch (closeError) {
+      log.warn('Erreur lors de la fermeture de la connexion SFTP', {
+        error: closeError.message,
+      });
+    }
+  }
+}
+
 module.exports = {
   uploadFile,
   listFiles,
   downloadFile,
   deleteFile,
+  moveFile,
   testConnection,
   createDirectory,
 };

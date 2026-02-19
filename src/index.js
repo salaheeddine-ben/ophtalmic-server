@@ -18,6 +18,7 @@ const { verifyShopifyWebhook, logWebhook } = require('./middlewares/shopifyWebho
 const webhookRoutes = require('./routes/webhookRoutes');
 const testRoutes = require('./routes/testRoutes');
 const { startStockSyncJob, getStats: getStockSyncStats } = require('./jobs/stockSyncJob');
+const { startStatusSyncJob, getStats: getStatusSyncStats } = require('./jobs/statusSyncJob');
 
 // Logger principal
 const log = logger;
@@ -84,6 +85,7 @@ app.get('/', (req, res) => {
 // Route de vérification de santé (pour les load balancers, etc.)
 app.get('/health', (req, res) => {
   const stockSyncStats = getStockSyncStats();
+  const statusSyncStats = getStatusSyncStats();
 
   res.json({
     status: 'healthy',
@@ -99,6 +101,17 @@ app.get('/health', (req, res) => {
       nextRun: stockSyncStats.nextRun,
       successCount: stockSyncStats.successCount,
       errorCount: stockSyncStats.errorCount,
+    },
+    statusSync: {
+      enabled: config.statusSync.enabled,
+      isRunning: statusSyncStats.isRunning,
+      lastRun: statusSyncStats.lastRun,
+      lastSuccess: statusSyncStats.lastSuccess,
+      nextRun: statusSyncStats.nextRun,
+      successCount: statusSyncStats.successCount,
+      errorCount: statusSyncStats.errorCount,
+      totalFilesProcessed: statusSyncStats.totalFilesProcessed,
+      totalOrdersUpdated: statusSyncStats.totalOrdersUpdated,
     },
     timestamp: new Date().toISOString(),
   });
@@ -189,6 +202,15 @@ async function startServer() {
       });
     }
 
+    // Démarrer le job de synchronisation des statuts de commandes
+    const statusJob = startStatusSyncJob();
+
+    if (statusJob) {
+      log.info('Job de synchronisation des statuts initialisé', {
+        nextRun: statusJob.nextDate().toISO(),
+      });
+    }
+
     // Démarrer le serveur HTTP
     const server = app.listen(config.server.port, () => {
       log.info('Serveur démarré', {
@@ -236,9 +258,11 @@ function setupGracefulShutdown(server) {
     log.info(`Signal ${signal} reçu - Arrêt du serveur...`);
     console.log(`\n🛑 Signal ${signal} reçu - Arrêt gracieux en cours...`);
 
-    // Arrêter le job de synchronisation
+    // Arrêter les jobs de synchronisation
     const { stopStockSyncJob } = require('./jobs/stockSyncJob');
+    const { stopStatusSyncJob } = require('./jobs/statusSyncJob');
     stopStockSyncJob();
+    stopStatusSyncJob();
 
     // Fermer le serveur HTTP
     server.close((err) => {

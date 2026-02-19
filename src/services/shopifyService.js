@@ -442,6 +442,233 @@ async function getConfigurationInfo() {
   }
 }
 
+/**
+ * Recherche une commande par son nom (référence)
+ * Le nom est généralement au format "#1234" ou "SH1-1234"
+ *
+ * @param {string} orderName - Nom/référence de la commande
+ * @returns {Promise<Object|null>} Commande trouvée ou null
+ */
+async function findOrderByName(orderName) {
+  log.info('Recherche de commande par nom', { orderName });
+
+  try {
+    // Nettoyer le nom de la commande (enlever le # si présent)
+    const cleanName = orderName.replace(/^#/, '');
+
+    // Rechercher la commande par son nom
+    const response = await shopifyClient.get('/orders.json', {
+      params: {
+        name: cleanName,
+        status: 'any',
+        limit: 10,
+      },
+    });
+
+    // Chercher la correspondance exacte
+    const orders = response.data.orders || [];
+    const order = orders.find(
+      (o) =>
+        o.name === orderName ||
+        o.name === `#${cleanName}` ||
+        o.name === cleanName ||
+        o.order_number?.toString() === cleanName
+    );
+
+    if (order) {
+      log.info('Commande trouvée', {
+        orderName,
+        orderId: order.id,
+        fulfillmentStatus: order.fulfillment_status,
+      });
+      return order;
+    }
+
+    log.warn('Commande non trouvée', { orderName });
+    return null;
+  } catch (error) {
+    log.error('Erreur lors de la recherche de commande', {
+      orderName,
+      error: error.message,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Récupère les fulfillment orders d'une commande
+ * Nécessaire pour créer un fulfillment avec la nouvelle API Shopify
+ *
+ * @param {string} orderId - ID de la commande Shopify
+ * @returns {Promise<Array>} Liste des fulfillment orders
+ */
+async function getFulfillmentOrders(orderId) {
+  log.info('Récupération des fulfillment orders', { orderId });
+
+  try {
+    const response = await shopifyClient.get(`/orders/${orderId}/fulfillment_orders.json`);
+
+    return response.data.fulfillment_orders || [];
+  } catch (error) {
+    log.error('Erreur lors de la récupération des fulfillment orders', {
+      orderId,
+      error: error.message,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Marque une commande comme expédiée (fulfilled) sur Shopify
+ *
+ * @param {string} orderRef - Référence de la commande (nom comme SH1-1234)
+ * @param {Object} options - Options de fulfillment
+ * @param {string} options.trackingNumber - Numéro de suivi (optionnel)
+ * @param {string} options.trackingCompany - Transporteur (optionnel)
+ * @param {boolean} options.notifyCustomer - Notifier le client par email (défaut: true)
+ * @returns {Promise<Object>} Résultat du fulfillment
+ */
+async function fulfillOrder(orderRef, options = {}) {
+  log.info('Fulfillment de la commande', { orderRef, options });
+
+  try {
+    // 1. Trouver la commande par son nom
+    const order = await findOrderByName(orderRef);
+
+    if (!order) {
+      return {
+        success: false,
+        error: `Commande non trouvée: ${orderRef}`,
+      };
+    }
+
+    // Vérifier si déjà fulfilled
+    if (order.fulfillment_status === 'fulfilled') {
+      log.info('Commande déjà fulfilled', { orderRef, orderId: order.id });
+      return {
+        success: true,
+        message: 'Commande déjà marquée comme expédiée',
+        alreadyFulfilled: true,
+        orderId: order.id,
+      };
+    }
+
+    // 2. Récupérer les fulfillment orders
+    const fulfillmentOrders = await getFulfillmentOrders(order.id);
+
+    if (!fulfillmentOrders || fulfillmentOrders.length === 0) {
+      return {
+        success: false,
+        error: 'Aucun fulfillment order trouvé pour cette commande',
+        orderId: order.id,
+      };
+    }
+
+    // 3. Créer le fulfillment pour chaque fulfillment order qui n'est pas déjà fulfilled
+    const results = [];
+
+    for (const fo of fulfillmentOrders) {
+      if (fo.status === 'closed' || fo.status === 'cancelled') {
+        continue;
+      }
+
+      // Préparer les line items à fulfiller
+      const lineItemsByFulfillmentOrder = {
+        fulfillment_order_id: fo.id,
+      };
+
+      // Créer le fulfillment
+      const fulfillmentPayload = {
+        fulfillment: {
+          line_items_by_fulfillment_order: [lineItemsByFulfillmentOrder],
+          notify_customer: options.notifyCustomer !== false,
+        },
+      };
+
+      // Ajouter les informations de tracking si fournies
+      if (options.trackingNumber) {
+        fulfillmentPayload.fulfillment.tracking_info = {
+          number: options.trackingNumber,
+          company: options.trackingCompany || '',
+        };
+      }
+
+      try {
+        const response = await shopifyClient.post('/fulfillments.json', fulfillmentPayload);
+
+        results.push({
+          fulfillmentOrderId: fo.id,
+          fulfillmentId: response.data.fulfillment?.id,
+          status: 'success',
+        });
+
+        log.info('Fulfillment créé', {
+          orderRef,
+          fulfillmentOrderId: fo.id,
+          fulfillmentId: response.data.fulfillment?.id,
+        });
+      } catch (fulfillError) {
+        log.error('Erreur lors de la création du fulfillment', {
+          orderRef,
+          fulfillmentOrderId: fo.id,
+          error: fulfillError.message,
+          response: fulfillError.response?.data,
+        });
+
+        results.push({
+          fulfillmentOrderId: fo.id,
+          status: 'error',
+          error: fulfillError.message,
+        });
+      }
+    }
+
+    const allSuccess = results.every((r) => r.status === 'success');
+
+    return {
+      success: allSuccess,
+      orderId: order.id,
+      orderRef,
+      fulfillments: results,
+      message: allSuccess
+        ? 'Commande marquée comme expédiée'
+        : 'Certains fulfillments ont échoué',
+    };
+  } catch (error) {
+    log.error('Erreur lors du fulfillment de la commande', {
+      orderRef,
+      error: error.message,
+    });
+
+    return {
+      success: false,
+      error: error.message,
+    };
+  }
+}
+
+/**
+ * Récupère une commande par son ID
+ *
+ * @param {string} orderId - ID de la commande Shopify
+ * @returns {Promise<Object>} Données de la commande
+ */
+async function getOrder(orderId) {
+  log.info('Récupération de la commande', { orderId });
+
+  try {
+    const response = await shopifyClient.get(`/orders/${orderId}.json`);
+
+    return response.data.order;
+  } catch (error) {
+    log.error('Erreur lors de la récupération de la commande', {
+      orderId,
+      error: error.message,
+    });
+    throw error;
+  }
+}
+
 module.exports = {
   updateInventoryLevel,
   getProduct,
@@ -451,4 +678,8 @@ module.exports = {
   findProductBySku,
   testConnection,
   getConfigurationInfo,
+  findOrderByName,
+  getFulfillmentOrders,
+  fulfillOrder,
+  getOrder,
 };

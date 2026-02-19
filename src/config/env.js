@@ -99,8 +99,26 @@ const config = {
     port: parseInt(process.env.SFTP_PORT, 10) || 22,
     user: process.env.SFTP_USER,
     password: process.env.SFTP_PASSWORD,
-    // Dossier de destination sur le serveur SFTP
-    remoteDir: process.env.SFTP_REMOTE_DIR || '/commandes/',
+    // Dossier de destination sur le serveur SFTP (legacy - pour compatibilité)
+    remoteDir: process.env.SFTP_REMOTE_DIR || '/in/',
+    // Dossier pour déposer les commandes (envoi vers ERP)
+    remoteDirIn: process.env.SFTP_REMOTE_DIR_IN || '/in/',
+    // Dossier pour lire les statuts (retour de l'ERP)
+    remoteDirOut: process.env.SFTP_REMOTE_DIR_OUT || '/out/',
+  },
+
+  // ============================================
+  // Configuration de la synchronisation des statuts commandes
+  // ============================================
+  statusSync: {
+    // Activer/désactiver la synchronisation automatique des statuts
+    enabled: process.env.STATUS_SYNC_ENABLED !== 'false',
+    // Expression cron (par défaut: 2 fois par jour à 8h et 18h)
+    cronExpression: process.env.STATUS_SYNC_CRON || '0 8,18 * * *',
+    // Archiver les fichiers traités (true) ou les supprimer (false)
+    archiveProcessed: process.env.STATUS_SYNC_ARCHIVE !== 'false',
+    // Dossier d'archive pour les fichiers traités
+    archiveDir: process.env.STATUS_SYNC_ARCHIVE_DIR || '/out/processed/',
   },
 
   // ============================================
@@ -205,9 +223,15 @@ function printConfigSummary() {
   console.log(`   • Port: ${config.server.port}`);
   console.log(`   • Mode test: ${config.test.testMode ? 'Activé' : 'Désactivé'}`);
   console.log(`   • Sync stock auto: ${config.stockSync.enabled ? 'Activé' : 'Désactivé'}`);
+  console.log(`   • Sync statuts auto: ${config.statusSync.enabled ? 'Activé' : 'Désactivé'}`);
   console.log(`   • Shopify configuré: ${config.shopify.storeUrl ? 'Oui' : 'Non'}`);
   console.log(`   • Sage X3 configuré: ${config.sageX3.wsdlUrl ? 'Oui' : 'Non'}`);
-  console.log(`   • SFTP configuré: ${config.sftp.host ? 'Oui' : 'Non'}\n`);
+  console.log(`   • SFTP configuré: ${config.sftp.host ? 'Oui' : 'Non'}`);
+  if (config.sftp.host) {
+    console.log(`     - Dossier IN (commandes): ${config.sftp.remoteDirIn}`);
+    console.log(`     - Dossier OUT (statuts): ${config.sftp.remoteDirOut}`);
+  }
+  console.log('');
 }
 
 module.exports = {

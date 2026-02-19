@@ -245,8 +245,8 @@ async function exportOrder(order) {
       // Mode test : sauvegarder localement
       result = await saveFileLocally(fileContent, fileName);
     } else {
-      // Mode production : envoyer sur SFTP
-      result = await sftpService.uploadFile(fileContent, fileName);
+      // Mode production : envoyer sur SFTP dans le dossier /in/
+      result = await sftpService.uploadFile(fileContent, fileName, config.sftp.remoteDirIn);
     }
 
     log.info('Commande exportée avec succès', {
