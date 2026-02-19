@@ -67,7 +67,6 @@ function generateOrderFileContent(order) {
   // ============================================
   // Récupérer les montants directement de Shopify (pas de calcul)
   // ============================================
-  const taxRate = 0.20;
   const totalTTC = parseFloat(order.total_price) || 0;
   const totalTVA = parseFloat(order.total_tax) || 0;
 
@@ -121,10 +120,19 @@ function generateOrderFileContent(order) {
 
   // Parcourir les articles de la commande
   for (const item of order.line_items || []) {
-    // Prix TTC unitaire
+    // Prix TTC unitaire (depuis Shopify)
     const priceTTC = parseFloat(item.price) || 0;
 
-    // Calculer le prix HT (TVA à 20%)
+    // Récupérer le taux de TVA réel depuis Shopify (peut être 20%, 5.5%, etc.)
+    // tax_lines contient les taxes appliquées à cette ligne
+    let taxRate = 0.20; // Valeur par défaut si non trouvé
+
+    if (Array.isArray(item.tax_lines) && item.tax_lines.length > 0) {
+      // Shopify fournit le taux sous forme décimale (ex: 0.20 pour 20%, 0.055 pour 5.5%)
+      taxRate = parseFloat(item.tax_lines[0].rate) || 0.20;
+    }
+
+    // Calculer le prix HT avec le taux de TVA réel
     const priceHT = (priceTTC / (1 + taxRate)).toFixed(2);
 
     const quantity = parseInt(item.quantity) || 1;
@@ -142,8 +150,11 @@ function generateOrderFileContent(order) {
       }, 0);
     }
 
-    log.debug('Remise ligne', {
+    log.debug('Ligne produit', {
       sku: item.sku,
+      priceTTC,
+      taxRate: `${(taxRate * 100).toFixed(1)}%`,
+      priceHT,
       total_discount: item.total_discount,
       discount_allocations: item.discount_allocations,
       lineDiscountRetenu: lineDiscount,
