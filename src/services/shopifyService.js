@@ -669,6 +669,139 @@ async function getOrder(orderId) {
   }
 }
 
+/**
+ * Ajoute ou met à jour une note sur une commande Shopify
+ *
+ * La note sera AJOUTÉE à la note existante (pas de remplacement)
+ * pour conserver l'historique des mises à jour.
+ *
+ * @param {string} orderRef - Référence de la commande (nom comme SH1-1234)
+ * @param {string} noteContent - Contenu de la note à ajouter
+ * @param {Object} options - Options
+ * @param {boolean} options.append - Ajouter à la note existante (défaut: true)
+ * @returns {Promise<Object>} Résultat de la mise à jour
+ */
+async function addOrderNote(orderRef, noteContent, options = {}) {
+  log.info('Ajout de note sur la commande', { orderRef });
+
+  try {
+    // 1. Trouver la commande par son nom
+    const order = await findOrderByName(orderRef);
+
+    if (!order) {
+      return {
+        success: false,
+        error: `Commande non trouvée: ${orderRef}`,
+      };
+    }
+
+    // 2. Construire la nouvelle note
+    let newNote;
+
+    if (options.append !== false && order.note) {
+      // Ajouter à la note existante
+      newNote = `${order.note}\n\n${noteContent}`;
+    } else {
+      // Remplacer la note
+      newNote = noteContent;
+    }
+
+    // 3. Mettre à jour la commande
+    const response = await shopifyClient.put(`/orders/${order.id}.json`, {
+      order: {
+        id: order.id,
+        note: newNote,
+      },
+    });
+
+    log.info('Note ajoutée avec succès', {
+      orderRef,
+      orderId: order.id,
+      noteLength: newNote.length,
+    });
+
+    return {
+      success: true,
+      orderId: order.id,
+      orderRef,
+      noteAdded: true,
+      message: 'Note ajoutée sur la commande',
+    };
+  } catch (error) {
+    log.error('Erreur lors de l\'ajout de la note', {
+      orderRef,
+      error: error.message,
+      response: error.response?.data,
+    });
+
+    return {
+      success: false,
+      error: error.message,
+    };
+  }
+}
+
+/**
+ * Ajoute des tags sur une commande Shopify
+ *
+ * @param {string} orderRef - Référence de la commande (nom comme SH1-1234)
+ * @param {string[]} tags - Tags à ajouter
+ * @returns {Promise<Object>} Résultat de la mise à jour
+ */
+async function addOrderTags(orderRef, tags) {
+  log.info('Ajout de tags sur la commande', { orderRef, tags });
+
+  try {
+    // 1. Trouver la commande par son nom
+    const order = await findOrderByName(orderRef);
+
+    if (!order) {
+      return {
+        success: false,
+        error: `Commande non trouvée: ${orderRef}`,
+      };
+    }
+
+    // 2. Fusionner les tags existants avec les nouveaux
+    const existingTags = order.tags ? order.tags.split(', ') : [];
+    const allTags = [...new Set([...existingTags, ...tags])];
+    const tagsString = allTags.join(', ');
+
+    // 3. Mettre à jour la commande
+    const response = await shopifyClient.put(`/orders/${order.id}.json`, {
+      order: {
+        id: order.id,
+        tags: tagsString,
+      },
+    });
+
+    log.info('Tags ajoutés avec succès', {
+      orderRef,
+      orderId: order.id,
+      tags: allTags,
+    });
+
+    return {
+      success: true,
+      orderId: order.id,
+      orderRef,
+      tags: allTags,
+      message: 'Tags ajoutés sur la commande',
+    };
+  } catch (error) {
+    log.error('Erreur lors de l\'ajout des tags', {
+      orderRef,
+      error: error.message,
+      response: error.response?.data,
+    });
+
+    return {
+      success: false,
+      error: error.message,
+    };
+  }
+}
+
 module.exports = {
   updateInventoryLevel,
   getProduct,
@@ -682,4 +815,6 @@ module.exports = {
   getFulfillmentOrders,
   fulfillOrder,
   getOrder,
+  addOrderNote,
+  addOrderTags,
 };

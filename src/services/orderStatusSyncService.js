@@ -6,14 +6,16 @@
  *
  * Fonctionnement :
  * 1. Lit tous les fichiers .txt dans /out/
- * 2. Parse chaque fichier (référence commande + lignes produits avec statut)
- * 3. Détermine le statut global de la commande
- * 4. Met à jour le statut sur Shopify
- * 5. Archive ou supprime les fichiers traités
+ * 2. Parse chaque fichier CSV (format Sage X3)
+ * 3. Groupe les lignes par commande
+ * 4. Détermine le statut global (basé sur QuantiteRestante)
+ * 5. Met à jour le statut sur Shopify + ajoute une note
+ * 6. Archive ou supprime les fichiers traités
  *
- * Format attendu du fichier de statut (à adapter selon specs client) :
- * Ligne 1: REF_COMMANDE
- * Lignes suivantes: SKU|STATUT
+ * Format du fichier CSV Sage X3 :
+ * - Séparateur : ; (point-virgule)
+ * - Première ligne : En-tête avec noms de colonnes
+ * - Colonnes : NumCmd;NumLigneBL;NumLigneCmd;QuantiteRestante;QuantiteLivree;QuantiteCommandee;Article;NumBl;NumCmdX3
  *
  * @module services/orderStatusSyncService
  */
@@ -28,141 +30,217 @@ const shopifyService = require('./shopifyService');
 const log = createModuleLogger('orderStatusSyncService');
 
 /**
- * Mapping des statuts ERP vers les statuts Shopify
- * À adapter selon les valeurs réelles envoyées par l'ERP client
+ * Noms des colonnes attendues dans le fichier CSV
  */
-const STATUS_MAPPING = {
-  // Statuts ERP possibles (à confirmer avec le client)
-  'EXPEDIE': 'fulfilled',
-  'EXPEDIEE': 'fulfilled',
-  'SHIPPED': 'fulfilled',
-  'LIVRE': 'fulfilled',
-  'LIVREE': 'fulfilled',
-  'EN_PREPARATION': 'in_progress',
-  'EN_COURS': 'in_progress',
-  'PREPARING': 'in_progress',
-  'ANNULE': 'cancelled',
-  'ANNULEE': 'cancelled',
-  'CANCELLED': 'cancelled',
-  'RUPTURE': 'unfulfilled',
-  'EN_ATTENTE': 'pending',
-  'PENDING': 'pending',
+const CSV_COLUMNS = {
+  NUM_CMD: 0,           // Référence commande Shopify (ex: SH1-1013)
+  NUM_LIGNE_BL: 1,      // Numéro de ligne du Bon de Livraison
+  NUM_LIGNE_CMD: 2,     // Numéro de ligne de la commande
+  QTE_RESTANTE: 3,      // Quantité restant à livrer (0 = tout livré)
+  QTE_LIVREE: 4,        // Quantité déjà livrée
+  QTE_COMMANDEE: 5,     // Quantité commandée
+  ARTICLE: 6,           // Code article Sage X3
+  NUM_BL: 7,            // Numéro du Bon de Livraison Sage
+  NUM_CMD_X3: 8,        // Numéro de commande Sage X3
 };
 
 /**
- * Parse un fichier de statut et extrait les informations
+ * Parse un fichier CSV de statut Sage X3
  *
- * Format attendu (à adapter selon specs client) :
- * Ligne 1: REF_COMMANDE (ex: SH1-1234)
- * Lignes suivantes: SKU|STATUT
- *
- * @param {string} content - Contenu du fichier
+ * @param {string|Buffer} content - Contenu du fichier
  * @param {string} fileName - Nom du fichier (pour les logs)
- * @returns {Object} { orderRef, lines: [{ sku, status }], rawContent }
+ * @returns {Object} { orders: Map<orderRef, orderData>, rawContent }
  */
 function parseStatusFile(content, fileName) {
-  log.debug('Parsing du fichier de statut', { fileName });
+  log.debug('Parsing du fichier de statut CSV', { fileName });
 
-  const lines = content.toString('utf-8').trim().split('\n');
+  const contentStr = content.toString('utf-8');
+  // Gérer les retours à la ligne Windows (CRLF) et Unix (LF)
+  const lines = contentStr.trim().split(/\r?\n/);
 
   if (lines.length < 2) {
     throw new Error(`Fichier invalide (moins de 2 lignes): ${fileName}`);
   }
 
-  // Première ligne = référence commande
-  const orderRef = lines[0].trim();
+  // Première ligne = en-tête (on la vérifie mais on ne l'utilise pas)
+  const header = lines[0].trim();
+  log.debug('En-tête du fichier CSV', { header });
 
-  if (!orderRef) {
-    throw new Error(`Référence commande vide dans le fichier: ${fileName}`);
-  }
+  // Map pour grouper les lignes par commande
+  const ordersMap = new Map();
 
-  // Lignes suivantes = SKU|STATUT
-  const productLines = [];
-
+  // Parser les lignes de données (à partir de la ligne 2)
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
 
     if (!line) continue; // Ignorer les lignes vides
 
-    const parts = line.split('|');
+    const parts = line.split(';');
 
-    if (parts.length < 2) {
-      log.warn('Ligne de produit invalide ignorée', {
+    if (parts.length < 9) {
+      log.warn('Ligne CSV invalide ignorée (moins de 9 colonnes)', {
         fileName,
         lineNumber: i + 1,
         line,
+        columnsFound: parts.length,
       });
       continue;
     }
 
-    const sku = parts[0].trim();
-    const status = parts[1].trim().toUpperCase();
+    // Extraire les données de la ligne
+    const lineData = {
+      numCmd: parts[CSV_COLUMNS.NUM_CMD]?.trim(),
+      numLigneBL: parts[CSV_COLUMNS.NUM_LIGNE_BL]?.trim(),
+      numLigneCmd: parts[CSV_COLUMNS.NUM_LIGNE_CMD]?.trim(),
+      qteRestante: parseInt(parts[CSV_COLUMNS.QTE_RESTANTE], 10) || 0,
+      qteLivree: parseInt(parts[CSV_COLUMNS.QTE_LIVREE], 10) || 0,
+      qteCommandee: parseInt(parts[CSV_COLUMNS.QTE_COMMANDEE], 10) || 0,
+      article: parts[CSV_COLUMNS.ARTICLE]?.trim(),
+      numBL: parts[CSV_COLUMNS.NUM_BL]?.trim(),
+      numCmdX3: parts[CSV_COLUMNS.NUM_CMD_X3]?.trim(),
+    };
 
-    productLines.push({
-      sku,
-      statusRaw: status,
-      statusShopify: STATUS_MAPPING[status] || 'unknown',
-    });
+    if (!lineData.numCmd) {
+      log.warn('Ligne sans référence commande ignorée', {
+        fileName,
+        lineNumber: i + 1,
+      });
+      continue;
+    }
+
+    // Ajouter la ligne à la commande correspondante
+    if (!ordersMap.has(lineData.numCmd)) {
+      ordersMap.set(lineData.numCmd, {
+        orderRef: lineData.numCmd,
+        lines: [],
+        numBL: lineData.numBL,       // Prendre le premier NumBL trouvé
+        numCmdX3: lineData.numCmdX3, // Prendre le premier NumCmdX3 trouvé
+      });
+    }
+
+    const orderData = ordersMap.get(lineData.numCmd);
+    orderData.lines.push(lineData);
+
+    // Mettre à jour NumBL et NumCmdX3 si pas encore défini
+    if (!orderData.numBL && lineData.numBL) {
+      orderData.numBL = lineData.numBL;
+    }
+    if (!orderData.numCmdX3 && lineData.numCmdX3) {
+      orderData.numCmdX3 = lineData.numCmdX3;
+    }
   }
 
-  log.info('Fichier de statut parsé', {
+  log.info('Fichier de statut CSV parsé', {
     fileName,
-    orderRef,
-    lineCount: productLines.length,
+    ordersFound: ordersMap.size,
+    totalLines: lines.length - 1,
   });
 
   return {
-    orderRef,
-    lines: productLines,
-    rawContent: content.toString('utf-8'),
+    orders: ordersMap,
+    rawContent: contentStr,
+    header,
   };
 }
 
 /**
- * Détermine le statut global de la commande basé sur les statuts des lignes
+ * Détermine le statut global d'une commande basé sur QuantiteRestante
  *
  * Logique :
- * - Si TOUTES les lignes sont "fulfilled" → commande fulfilled
- * - Si AU MOINS UNE ligne est "cancelled" et les autres "fulfilled" → partial
- * - Si TOUTES les lignes sont "cancelled" → cancelled
- * - Sinon → in_progress
+ * - Si TOUTES les lignes ont QuantiteRestante = 0 → fulfilled (totalement expédiée)
+ * - Si CERTAINES lignes ont QuantiteRestante > 0 → partial (partiellement expédiée)
+ * - Si TOUTES les lignes ont QuantiteRestante > 0 et QteLivree = 0 → pending (en attente)
  *
- * @param {Array} lines - Lignes de produits avec leurs statuts
- * @returns {string} Statut global de la commande
+ * @param {Array} lines - Lignes de la commande
+ * @returns {Object} { status, fulfilledLines, pendingLines, totalQteRestante }
  */
 function determineOrderStatus(lines) {
   if (!lines || lines.length === 0) {
-    return 'unknown';
+    return {
+      status: 'unknown',
+      fulfilledLines: 0,
+      pendingLines: 0,
+      totalQteRestante: 0,
+    };
   }
 
-  const statuses = lines.map((l) => l.statusShopify);
+  let fulfilledLines = 0;
+  let pendingLines = 0;
+  let totalQteRestante = 0;
+  let totalQteLivree = 0;
 
-  const allFulfilled = statuses.every((s) => s === 'fulfilled');
-  const allCancelled = statuses.every((s) => s === 'cancelled');
-  const someFulfilled = statuses.some((s) => s === 'fulfilled');
-  const someCancelled = statuses.some((s) => s === 'cancelled');
+  for (const line of lines) {
+    totalQteRestante += line.qteRestante;
+    totalQteLivree += line.qteLivree;
 
-  if (allFulfilled) {
-    return 'fulfilled';
+    if (line.qteRestante === 0) {
+      fulfilledLines++;
+    } else {
+      pendingLines++;
+    }
   }
 
-  if (allCancelled) {
-    return 'cancelled';
+  let status;
+
+  if (fulfilledLines === lines.length) {
+    // Toutes les lignes sont complètement livrées
+    status = 'fulfilled';
+  } else if (totalQteLivree > 0) {
+    // Au moins une partie a été livrée
+    status = 'partial';
+  } else {
+    // Rien n'a été livré encore
+    status = 'pending';
   }
 
-  if (someFulfilled && someCancelled) {
-    return 'partial';
-  }
-
-  if (someFulfilled) {
-    return 'in_progress';
-  }
-
-  return 'pending';
+  return {
+    status,
+    fulfilledLines,
+    pendingLines,
+    totalLines: lines.length,
+    totalQteRestante,
+    totalQteLivree,
+  };
 }
 
 /**
- * Traite un fichier de statut individuel
+ * Génère le texte de la note à ajouter sur Shopify
+ *
+ * @param {Object} orderData - Données de la commande
+ * @param {Object} statusInfo - Informations de statut
+ * @returns {string} Texte de la note
+ */
+function generateOrderNote(orderData, statusInfo) {
+  const now = new Date().toLocaleString('fr-FR', { timeZone: 'Europe/Paris' });
+
+  let noteLines = [
+    `══════════════════════════════════`,
+    `📦 MISE À JOUR SAGE X3 - ${now}`,
+    `══════════════════════════════════`,
+    ``,
+    `🔹 N° Bon de Livraison : ${orderData.numBL || 'N/A'}`,
+    `🔹 N° Commande Sage X3 : ${orderData.numCmdX3 || 'N/A'}`,
+    ``,
+    `📊 STATUT : ${statusInfo.status === 'fulfilled' ? '✅ EXPÉDIÉE' : statusInfo.status === 'partial' ? '⚠️ PARTIELLE' : '⏳ EN ATTENTE'}`,
+    ``,
+    `📋 DÉTAIL DES LIGNES :`,
+  ];
+
+  for (const line of orderData.lines) {
+    const lineStatus = line.qteRestante === 0 ? '✅' : '⏳';
+    noteLines.push(
+      `   ${lineStatus} ${line.article} : ${line.qteLivree}/${line.qteCommandee} livré(s) (reste: ${line.qteRestante})`
+    );
+  }
+
+  noteLines.push(``);
+  noteLines.push(`══════════════════════════════════`);
+
+  return noteLines.join('\n');
+}
+
+/**
+ * Traite toutes les commandes d'un fichier de statut
  *
  * @param {string} fileName - Nom du fichier
  * @param {Buffer} content - Contenu du fichier
@@ -171,60 +249,125 @@ function determineOrderStatus(lines) {
 async function processStatusFile(fileName, content) {
   log.info('Traitement du fichier de statut', { fileName });
 
+  const results = {
+    success: true,
+    fileName,
+    ordersProcessed: 0,
+    ordersSuccess: 0,
+    ordersFailed: 0,
+    orders: [],
+  };
+
   try {
-    // Parser le fichier
+    // Parser le fichier CSV
     const parsedData = parseStatusFile(content, fileName);
 
-    // Déterminer le statut global
-    const orderStatus = determineOrderStatus(parsedData.lines);
+    // Traiter chaque commande
+    for (const [orderRef, orderData] of parsedData.orders) {
+      const orderResult = {
+        orderRef,
+        numBL: orderData.numBL,
+        numCmdX3: orderData.numCmdX3,
+        lineCount: orderData.lines.length,
+      };
 
-    log.info('Statut de commande déterminé', {
-      orderRef: parsedData.orderRef,
-      lineCount: parsedData.lines.length,
-      orderStatus,
-      lineStatuses: parsedData.lines.map((l) => `${l.sku}: ${l.statusRaw}`),
-    });
-
-    // TODO: Mettre à jour la commande sur Shopify
-    // Cette partie sera implémentée une fois qu'on aura confirmé le format du fichier
-    // et les actions à effectuer sur Shopify
-
-    let shopifyUpdateResult = null;
-
-    if (orderStatus === 'fulfilled') {
-      // Marquer la commande comme expédiée sur Shopify
       try {
-        shopifyUpdateResult = await shopifyService.fulfillOrder(parsedData.orderRef);
-      } catch (shopifyError) {
-        log.error('Erreur mise à jour Shopify', {
-          orderRef: parsedData.orderRef,
-          error: shopifyError.message,
-        });
-        shopifyUpdateResult = { success: false, error: shopifyError.message };
-      }
-    }
+        // Déterminer le statut
+        const statusInfo = determineOrderStatus(orderData.lines);
+        orderResult.status = statusInfo.status;
+        orderResult.statusInfo = statusInfo;
 
-    return {
-      success: true,
-      fileName,
-      orderRef: parsedData.orderRef,
-      lineCount: parsedData.lines.length,
-      orderStatus,
-      lines: parsedData.lines,
-      shopifyUpdate: shopifyUpdateResult,
-    };
+        log.info('Statut de commande déterminé', {
+          orderRef,
+          status: statusInfo.status,
+          fulfilledLines: statusInfo.fulfilledLines,
+          pendingLines: statusInfo.pendingLines,
+        });
+
+        // Générer la note pour Shopify
+        const note = generateOrderNote(orderData, statusInfo);
+        orderResult.note = note;
+
+        // Mettre à jour Shopify
+        let shopifyResult = { success: true, actions: [] };
+
+        // 1. Ajouter la note sur la commande
+        try {
+          const noteResult = await shopifyService.addOrderNote(orderRef, note);
+          shopifyResult.actions.push({
+            action: 'addNote',
+            success: noteResult.success,
+            error: noteResult.error,
+          });
+        } catch (noteError) {
+          log.error('Erreur ajout note Shopify', {
+            orderRef,
+            error: noteError.message,
+          });
+          shopifyResult.actions.push({
+            action: 'addNote',
+            success: false,
+            error: noteError.message,
+          });
+        }
+
+        // 2. Si totalement expédiée, marquer comme fulfilled
+        if (statusInfo.status === 'fulfilled') {
+          try {
+            const fulfillResult = await shopifyService.fulfillOrder(orderRef, {
+              notifyCustomer: true,
+            });
+            shopifyResult.actions.push({
+              action: 'fulfill',
+              success: fulfillResult.success,
+              alreadyFulfilled: fulfillResult.alreadyFulfilled,
+              error: fulfillResult.error,
+            });
+          } catch (fulfillError) {
+            log.error('Erreur fulfillment Shopify', {
+              orderRef,
+              error: fulfillError.message,
+            });
+            shopifyResult.actions.push({
+              action: 'fulfill',
+              success: false,
+              error: fulfillError.message,
+            });
+          }
+        }
+
+        orderResult.shopifyUpdate = shopifyResult;
+        orderResult.success = shopifyResult.actions.every(a => a.success || a.alreadyFulfilled);
+
+        if (orderResult.success) {
+          results.ordersSuccess++;
+        } else {
+          results.ordersFailed++;
+        }
+      } catch (orderError) {
+        log.error('Erreur traitement commande', {
+          orderRef,
+          error: orderError.message,
+        });
+        orderResult.success = false;
+        orderResult.error = orderError.message;
+        results.ordersFailed++;
+      }
+
+      results.ordersProcessed++;
+      results.orders.push(orderResult);
+    }
   } catch (error) {
     log.error('Erreur lors du traitement du fichier de statut', {
       fileName,
       error: error.message,
     });
 
-    return {
-      success: false,
-      fileName,
-      error: error.message,
-    };
+    results.success = false;
+    results.error = error.message;
   }
+
+  return results;
 }
 
 /**
@@ -317,6 +460,9 @@ async function syncAllStatusFiles() {
     filesSuccess: 0,
     filesFailed: 0,
     filesArchived: 0,
+    totalOrdersProcessed: 0,
+    totalOrdersSuccess: 0,
+    totalOrdersFailed: 0,
     details: [],
     errors: [],
   };
@@ -355,6 +501,9 @@ async function syncAllStatusFiles() {
         const processResult = await processStatusFile(file.name, content);
 
         results.details.push(processResult);
+        results.totalOrdersProcessed += processResult.ordersProcessed;
+        results.totalOrdersSuccess += processResult.ordersSuccess;
+        results.totalOrdersFailed += processResult.ordersFailed;
 
         if (processResult.success) {
           results.filesSuccess++;
@@ -405,6 +554,7 @@ async function syncAllStatusFiles() {
     filesProcessed: results.filesProcessed,
     filesSuccess: results.filesSuccess,
     filesFailed: results.filesFailed,
+    totalOrdersProcessed: results.totalOrdersProcessed,
     durationMs: results.durationMs,
   });
 
@@ -439,16 +589,29 @@ async function previewStatusFiles() {
       try {
         const content = await sftpService.downloadFile(file.name, config.sftp.remoteDirOut);
         const parsedData = parseStatusFile(content, file.name);
-        const orderStatus = determineOrderStatus(parsedData.lines);
+
+        // Convertir la Map en tableau pour la sérialisation JSON
+        const ordersArray = [];
+        for (const [orderRef, orderData] of parsedData.orders) {
+          const statusInfo = determineOrderStatus(orderData.lines);
+          ordersArray.push({
+            orderRef,
+            numBL: orderData.numBL,
+            numCmdX3: orderData.numCmdX3,
+            lineCount: orderData.lines.length,
+            status: statusInfo.status,
+            statusInfo,
+            lines: orderData.lines,
+            notePreview: generateOrderNote(orderData, statusInfo),
+          });
+        }
 
         results.files.push({
           fileName: file.name,
           size: file.size,
           modifyTime: file.modifyTime,
-          orderRef: parsedData.orderRef,
-          lineCount: parsedData.lines.length,
-          orderStatus,
-          lines: parsedData.lines,
+          ordersCount: parsedData.orders.size,
+          orders: ordersArray,
           rawContent: parsedData.rawContent,
         });
       } catch (parseError) {
@@ -465,6 +628,8 @@ async function previewStatusFiles() {
     results.error = error.message;
   }
 
+  results.timestamp = new Date().toISOString();
+
   return results;
 }
 
@@ -474,6 +639,7 @@ module.exports = {
   processStatusFile,
   parseStatusFile,
   determineOrderStatus,
+  generateOrderNote,
   archiveFile,
-  STATUS_MAPPING,
+  CSV_COLUMNS,
 };
