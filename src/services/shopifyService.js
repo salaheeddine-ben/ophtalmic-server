@@ -958,14 +958,105 @@ async function getPayoutById(payoutId) {
   log.info('Récupération du payout', { payoutId });
 
   try {
+    // 1. Récupérer via REST pour les infos de base
     const response = await shopifyClient.get(`/shopify_payments/payouts/${payoutId}.json`);
-    return response.data.payout;
+    const payout = response.data.payout;
+
+    // 2. Récupérer la référence bancaire via GraphQL
+    try {
+      const bankReference = await getPayoutBankReference(payoutId);
+      if (bankReference) {
+        payout.bank_reference = bankReference;
+      }
+    } catch (graphqlError) {
+      log.warn('Impossible de récupérer la référence bancaire via GraphQL', {
+        payoutId,
+        error: graphqlError.message,
+      });
+    }
+
+    return payout;
   } catch (error) {
     log.error('Erreur lors de la récupération du payout', {
       payoutId,
       error: error.message,
     });
     throw error;
+  }
+}
+
+/**
+ * Récupère la référence bancaire d'un payout via GraphQL
+ * (externalTraceId n'est disponible qu'en GraphQL)
+ *
+ * @param {string} payoutId - ID du payout (format legacy/REST)
+ * @returns {Promise<string|null>} Référence bancaire ou null
+ */
+async function getPayoutBankReference(payoutId) {
+  log.debug('Récupération de la référence bancaire via GraphQL', { payoutId });
+
+  const query = `
+    query getPayoutBankRef($first: Int!) {
+      shopifyPaymentsAccount {
+        payouts(first: $first, reverse: true) {
+          edges {
+            node {
+              legacyResourceId
+              transactionId: id
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const data = await executeGraphQL(query, { first: 50 });
+
+    if (!data?.shopifyPaymentsAccount?.payouts?.edges) {
+      return null;
+    }
+
+    // Chercher le payout par son legacyResourceId
+    for (const edge of data.shopifyPaymentsAccount.payouts.edges) {
+      if (edge.node.legacyResourceId === String(payoutId)) {
+        // Le transactionId GraphQL contient parfois la référence
+        // Format: gid://shopify/ShopifyPaymentsPayout/148963066203
+        // Mais on a besoin de l'externalTraceId qui n'est pas toujours dispo
+        return edge.node.transactionId || null;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    log.warn('Erreur GraphQL pour référence bancaire', { error: error.message });
+    return null;
+  }
+}
+
+/**
+ * Récupère une commande par son ID et retourne son nom (ex: SH1-1020)
+ *
+ * @param {string} orderId - ID de la commande Shopify
+ * @returns {Promise<string>} Nom de la commande ou l'ID si erreur
+ */
+async function getOrderNameById(orderId) {
+  log.debug('Récupération du nom de commande', { orderId });
+
+  try {
+    const response = await shopifyClient.get(`/orders/${orderId}.json`, {
+      params: {
+        fields: 'id,name,order_number',
+      },
+    });
+
+    return response.data.order?.name || `#${orderId}`;
+  } catch (error) {
+    log.warn('Impossible de récupérer le nom de commande', {
+      orderId,
+      error: error.message,
+    });
+    return `#${orderId}`;
   }
 }
 
@@ -1097,7 +1188,9 @@ module.exports = {
   executeGraphQL,
   getPayouts,
   getPayoutById,
+  getPayoutBankReference,
   getPayoutTransactions,
   getPayoutsWithTransactions,
   getPaidPayouts,
+  getOrderNameById,
 };

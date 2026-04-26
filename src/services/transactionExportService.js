@@ -112,7 +112,7 @@ function formatAmount(amount) {
  * Date commande|N° commande|Montant brut|Frais|Montant net
  *
  * @param {Object} payout - Données du payout
- * @param {Array} transactions - Transactions du payout
+ * @param {Array} transactions - Transactions du payout (avec orderName enrichi)
  * @returns {string} Contenu du fichier TXT
  */
 function generateTransactionFileContent(payout, transactions) {
@@ -135,8 +135,8 @@ function generateTransactionFileContent(payout, transactions) {
     totalNet += parseFloat(t.net) || 0;
   }
 
-  // Référence bancaire : utiliser l'ID du payout si pas de référence externe
-  const bankReference = payout.id || 'N/A';
+  // Référence bancaire : utiliser bank_reference si disponible, sinon l'ID
+  const bankReference = payout.bank_reference || payout.id || 'N/A';
 
   // ============================================
   // Construire la section ENTETE
@@ -158,14 +158,12 @@ function generateTransactionFileContent(payout, transactions) {
   const itemLines = ['LIGNES'];
 
   for (const transaction of orderTransactions) {
-    // Récupérer le numéro de commande depuis source_order_transaction_id
-    const orderNumber = transaction.source_order_id
-      ? `#${transaction.source_order_id}`
-      : (transaction.source_id || 'N/A');
+    // Utiliser le nom de commande enrichi (ex: SH1-1020) ou fallback sur l'ID
+    const orderNumber = transaction.orderName || `#${transaction.source_order_id || transaction.source_id || 'N/A'}`;
 
     const line = [
       formatDate(transaction.processed_at),  // Date de commande
-      orderNumber,                            // N° commande Shopify
+      orderNumber,                            // N° commande Shopify (ex: SH1-1020)
       formatAmount(transaction.amount),       // Montant brut HT frais
       formatAmount(transaction.fee),          // Montant des frais
       formatAmount(transaction.net),          // Montant net après frais
@@ -181,6 +179,7 @@ function generateTransactionFileContent(payout, transactions) {
 
   log.debug('Contenu du fichier généré', {
     payoutId: payout.id,
+    bankReference,
     lineCount: orderTransactions.length,
     totalGross,
     totalFee,
@@ -191,16 +190,53 @@ function generateTransactionFileContent(payout, transactions) {
 }
 
 /**
+ * Enrichit les transactions avec les noms de commandes
+ *
+ * @param {Array} transactions - Transactions brutes
+ * @returns {Promise<Array>} Transactions avec orderName ajouté
+ */
+async function enrichTransactionsWithOrderNames(transactions) {
+  log.info('Enrichissement des transactions avec noms de commandes', {
+    count: transactions.length,
+  });
+
+  const enrichedTransactions = [];
+
+  for (const transaction of transactions) {
+    const enriched = { ...transaction };
+
+    // Si c'est une charge avec un source_order_id, récupérer le nom
+    if (transaction.type === 'charge' && transaction.source_order_id) {
+      try {
+        const orderName = await shopifyService.getOrderNameById(transaction.source_order_id);
+        enriched.orderName = orderName;
+      } catch (error) {
+        log.warn('Impossible de récupérer le nom de commande', {
+          orderId: transaction.source_order_id,
+          error: error.message,
+        });
+        enriched.orderName = `#${transaction.source_order_id}`;
+      }
+    }
+
+    enrichedTransactions.push(enriched);
+  }
+
+  return enrichedTransactions;
+}
+
+/**
  * Génère le nom du fichier pour un payout
  *
- * Format: TRANSACTION_[DATE]_[REF].txt
+ * Format: TRANSACTION_[DATE]_[REF_BANCAIRE].txt
  *
  * @param {Object} payout - Données du payout
  * @returns {string} Nom du fichier
  */
 function generateFileName(payout) {
   const date = formatDate(payout.date).replace(/-/g, '');
-  const ref = String(payout.id).replace(/[^a-zA-Z0-9]/g, '');
+  // Utiliser la référence bancaire si disponible, sinon l'ID
+  const ref = String(payout.bank_reference || payout.id).replace(/[^a-zA-Z0-9]/g, '');
   return `TRANSACTION_${date}_${ref}.txt`;
 }
 
@@ -241,9 +277,12 @@ async function exportPayout(payoutId, options = {}) {
     }
 
     // 2. Récupérer les transactions du payout
-    const transactions = await shopifyService.getPayoutTransactions(payoutId);
+    const rawTransactions = await shopifyService.getPayoutTransactions(payoutId);
 
-    // 3. Générer le contenu du fichier
+    // 3. Enrichir les transactions avec les noms de commandes
+    const transactions = await enrichTransactionsWithOrderNames(rawTransactions);
+
+    // 4. Générer le contenu du fichier
     const fileContent = generateTransactionFileContent(payout, transactions);
     const fileName = generateFileName(payout);
 
@@ -401,7 +440,10 @@ async function previewPayoutFile(payoutId) {
       };
     }
 
-    const transactions = await shopifyService.getPayoutTransactions(payoutId);
+    // Récupérer et enrichir les transactions avec les noms de commandes
+    const rawTransactions = await shopifyService.getPayoutTransactions(payoutId);
+    const transactions = await enrichTransactionsWithOrderNames(rawTransactions);
+
     const fileContent = generateTransactionFileContent(payout, transactions);
     const fileName = generateFileName(payout);
 
@@ -412,6 +454,7 @@ async function previewPayoutFile(payoutId) {
       isAlreadyExported: isPayoutExported(payoutId),
       payout: {
         id: payout.id,
+        bank_reference: payout.bank_reference || null,
         date: payout.date,
         amount: payout.amount,
         currency: payout.currency,
