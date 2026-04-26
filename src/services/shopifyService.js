@@ -995,6 +995,7 @@ async function getPayoutById(payoutId) {
 async function getPayoutBankReference(payoutId) {
   log.debug('Récupération de la référence bancaire via GraphQL', { payoutId });
 
+  // Requête GraphQL avec externalTraceId (référence bancaire réelle)
   const query = `
     query getPayoutBankRef($first: Int!) {
       shopifyPaymentsAccount {
@@ -1002,7 +1003,7 @@ async function getPayoutBankReference(payoutId) {
           edges {
             node {
               legacyResourceId
-              transactionId: id
+              externalTraceId
             }
           }
         }
@@ -1020,10 +1021,8 @@ async function getPayoutBankReference(payoutId) {
     // Chercher le payout par son legacyResourceId
     for (const edge of data.shopifyPaymentsAccount.payouts.edges) {
       if (edge.node.legacyResourceId === String(payoutId)) {
-        // Le transactionId GraphQL contient parfois la référence
-        // Format: gid://shopify/ShopifyPaymentsPayout/148963066203
-        // Mais on a besoin de l'externalTraceId qui n'est pas toujours dispo
-        return edge.node.transactionId || null;
+        // externalTraceId est la vraie référence bancaire (ex: YYW1049573178526)
+        return edge.node.externalTraceId || null;
       }
     }
 
