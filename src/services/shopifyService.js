@@ -802,6 +802,282 @@ async function addOrderTags(orderRef, tags) {
   }
 }
 
+// ============================================
+// API GraphQL pour Shopify Payments (Payouts)
+// ============================================
+
+/**
+ * Crée un client pour l'API GraphQL Shopify
+ * Nécessaire pour accéder à externalTraceId (référence bancaire)
+ */
+function createGraphQLClient() {
+  const socksAgent = createSocksAgent();
+
+  return axios.create({
+    baseURL: `https://${config.shopify.storeUrl}/admin/api/${config.shopify.apiVersion}`,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Shopify-Access-Token': config.shopify.accessToken,
+    },
+    timeout: config.security.apiTimeout,
+    httpAgent: socksAgent,
+    httpsAgent: socksAgent,
+  });
+}
+
+const graphqlClient = createGraphQLClient();
+
+/**
+ * Exécute une requête GraphQL sur l'API Shopify
+ *
+ * @param {string} query - Requête GraphQL
+ * @param {Object} variables - Variables de la requête
+ * @returns {Promise<Object>} Réponse de l'API
+ */
+async function executeGraphQL(query, variables = {}) {
+  log.debug('Requête GraphQL Shopify', { variables });
+
+  try {
+    const response = await graphqlClient.post('/graphql.json', {
+      query,
+      variables,
+    });
+
+    if (response.data.errors) {
+      log.error('Erreurs GraphQL', { errors: response.data.errors });
+      throw new Error(response.data.errors[0]?.message || 'Erreur GraphQL');
+    }
+
+    return response.data.data;
+  } catch (error) {
+    log.error('Erreur lors de la requête GraphQL', {
+      error: error.message,
+      response: error.response?.data,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Récupère les payouts (virements bancaires) via GraphQL
+ * Inclut externalTraceId (référence bancaire) non disponible en REST
+ *
+ * @param {Object} options - Options de filtrage
+ * @param {number} options.first - Nombre de payouts à récupérer (défaut: 10)
+ * @param {string} options.status - Filtrer par statut (SCHEDULED, IN_TRANSIT, PAID, FAILED, CANCELLED)
+ * @returns {Promise<Array>} Liste des payouts
+ */
+async function getPayouts(options = {}) {
+  const { first = 10, status = null } = options;
+
+  log.info('Récupération des payouts via GraphQL', { first, status });
+
+  const query = `
+    query getPayouts($first: Int!) {
+      shopifyPaymentsAccount {
+        payouts(first: $first, reverse: true) {
+          edges {
+            node {
+              id
+              legacyResourceId
+              issuedAt
+              net {
+                amount
+                currencyCode
+              }
+              gross {
+                amount
+                currencyCode
+              }
+              fee {
+                amount
+                currencyCode
+              }
+              status
+              summary {
+                adjustmentsGross {
+                  amount
+                }
+                adjustmentsFee {
+                  amount
+                }
+                chargesGross {
+                  amount
+                }
+                chargesFee {
+                  amount
+                }
+                refundsGross {
+                  amount
+                }
+                refundsFee {
+                  amount
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const data = await executeGraphQL(query, { first });
+
+  if (!data?.shopifyPaymentsAccount?.payouts?.edges) {
+    return [];
+  }
+
+  // Transformer les données pour un format plus simple
+  const payouts = data.shopifyPaymentsAccount.payouts.edges.map((edge) => {
+    const node = edge.node;
+    return {
+      id: node.id,
+      legacyId: node.legacyResourceId,
+      issuedAt: node.issuedAt,
+      status: node.status,
+      net: parseFloat(node.net?.amount) || 0,
+      gross: parseFloat(node.gross?.amount) || 0,
+      fee: parseFloat(node.fee?.amount) || 0,
+      currency: node.net?.currencyCode || 'EUR',
+      summary: node.summary,
+    };
+  });
+
+  log.info('Payouts récupérés', { count: payouts.length });
+
+  return payouts;
+}
+
+/**
+ * Récupère un payout spécifique par son ID legacy (REST)
+ *
+ * @param {string} payoutId - ID du payout (format legacy/REST)
+ * @returns {Promise<Object>} Détails du payout
+ */
+async function getPayoutById(payoutId) {
+  log.info('Récupération du payout', { payoutId });
+
+  try {
+    const response = await shopifyClient.get(`/shopify_payments/payouts/${payoutId}.json`);
+    return response.data.payout;
+  } catch (error) {
+    log.error('Erreur lors de la récupération du payout', {
+      payoutId,
+      error: error.message,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Récupère les transactions d'un payout spécifique
+ *
+ * @param {string} payoutId - ID du payout
+ * @returns {Promise<Array>} Liste des transactions du payout
+ */
+async function getPayoutTransactions(payoutId) {
+  log.info('Récupération des transactions du payout', { payoutId });
+
+  try {
+    const response = await shopifyClient.get('/shopify_payments/balance/transactions.json', {
+      params: {
+        payout_id: payoutId,
+        limit: 250,
+      },
+    });
+
+    const transactions = response.data.transactions || [];
+
+    log.info('Transactions récupérées', {
+      payoutId,
+      count: transactions.length,
+    });
+
+    return transactions;
+  } catch (error) {
+    log.error('Erreur lors de la récupération des transactions', {
+      payoutId,
+      error: error.message,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Récupère tous les payouts avec leurs transactions
+ * Combine les données REST et GraphQL pour avoir toutes les infos
+ *
+ * @param {Object} options - Options
+ * @param {number} options.limit - Nombre de payouts (défaut: 10)
+ * @param {string} options.status - Filtrer par statut
+ * @returns {Promise<Array>} Payouts avec leurs transactions
+ */
+async function getPayoutsWithTransactions(options = {}) {
+  const { limit = 10 } = options;
+
+  log.info('Récupération des payouts avec transactions', { limit });
+
+  // 1. Récupérer les payouts via REST (plus complet pour les détails)
+  const response = await shopifyClient.get('/shopify_payments/payouts.json', {
+    params: { limit },
+  });
+
+  const payouts = response.data.payouts || [];
+
+  // 2. Pour chaque payout, récupérer les transactions
+  const payoutsWithTransactions = [];
+
+  for (const payout of payouts) {
+    try {
+      const transactions = await getPayoutTransactions(payout.id);
+
+      payoutsWithTransactions.push({
+        ...payout,
+        transactions,
+      });
+    } catch (error) {
+      log.warn('Impossible de récupérer les transactions du payout', {
+        payoutId: payout.id,
+        error: error.message,
+      });
+
+      payoutsWithTransactions.push({
+        ...payout,
+        transactions: [],
+        transactionsError: error.message,
+      });
+    }
+  }
+
+  return payoutsWithTransactions;
+}
+
+/**
+ * Récupère les payouts avec statut "paid" (virés sur le compte)
+ *
+ * @param {number} limit - Nombre de payouts à récupérer
+ * @returns {Promise<Array>} Payouts payés
+ */
+async function getPaidPayouts(limit = 20) {
+  log.info('Récupération des payouts payés', { limit });
+
+  try {
+    const response = await shopifyClient.get('/shopify_payments/payouts.json', {
+      params: {
+        limit,
+        status: 'paid',
+      },
+    });
+
+    return response.data.payouts || [];
+  } catch (error) {
+    log.error('Erreur lors de la récupération des payouts payés', {
+      error: error.message,
+    });
+    throw error;
+  }
+}
+
 module.exports = {
   updateInventoryLevel,
   getProduct,
@@ -817,4 +1093,11 @@ module.exports = {
   getOrder,
   addOrderNote,
   addOrderTags,
+  // Shopify Payments / Payouts
+  executeGraphQL,
+  getPayouts,
+  getPayoutById,
+  getPayoutTransactions,
+  getPayoutsWithTransactions,
+  getPaidPayouts,
 };

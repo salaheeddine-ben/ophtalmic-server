@@ -19,6 +19,7 @@ const webhookRoutes = require('./routes/webhookRoutes');
 const testRoutes = require('./routes/testRoutes');
 const { startStockSyncJob, getStats: getStockSyncStats } = require('./jobs/stockSyncJob');
 const { startStatusSyncJob, getStats: getStatusSyncStats } = require('./jobs/statusSyncJob');
+const { startTransactionSyncJob, getStats: getTransactionSyncStats } = require('./jobs/transactionSyncJob');
 
 // Logger principal
 const log = logger;
@@ -86,6 +87,7 @@ app.get('/', (req, res) => {
 app.get('/health', (req, res) => {
   const stockSyncStats = getStockSyncStats();
   const statusSyncStats = getStatusSyncStats();
+  const transactionSyncStats = getTransactionSyncStats();
 
   res.json({
     status: 'healthy',
@@ -112,6 +114,16 @@ app.get('/health', (req, res) => {
       errorCount: statusSyncStats.errorCount,
       totalFilesProcessed: statusSyncStats.totalFilesProcessed,
       totalOrdersUpdated: statusSyncStats.totalOrdersUpdated,
+    },
+    transactionExport: {
+      enabled: config.transactionExport.enabled,
+      isRunning: transactionSyncStats.isRunning,
+      lastRun: transactionSyncStats.lastRun,
+      lastSuccess: transactionSyncStats.lastSuccess,
+      nextRun: transactionSyncStats.nextRun,
+      successCount: transactionSyncStats.successCount,
+      errorCount: transactionSyncStats.errorCount,
+      totalPayoutsExported: transactionSyncStats.totalPayoutsExported,
     },
     timestamp: new Date().toISOString(),
   });
@@ -211,6 +223,15 @@ async function startServer() {
       });
     }
 
+    // Démarrer le job d'export des transactions bancaires
+    const transactionJob = startTransactionSyncJob();
+
+    if (transactionJob) {
+      log.info('Job d\'export des transactions initialisé', {
+        nextRun: transactionJob.nextDate().toISO(),
+      });
+    }
+
     // Démarrer le serveur HTTP
     const server = app.listen(config.server.port, () => {
       log.info('Serveur démarré', {
@@ -261,8 +282,10 @@ function setupGracefulShutdown(server) {
     // Arrêter les jobs de synchronisation
     const { stopStockSyncJob } = require('./jobs/stockSyncJob');
     const { stopStatusSyncJob } = require('./jobs/statusSyncJob');
+    const { stopTransactionSyncJob } = require('./jobs/transactionSyncJob');
     stopStockSyncJob();
     stopStatusSyncJob();
+    stopTransactionSyncJob();
 
     // Fermer le serveur HTTP
     server.close((err) => {

@@ -21,6 +21,8 @@ const orderExportService = require('../services/orderExportService');
 const webhookRoutes = require('./webhookRoutes');
 const orderStatusSyncService = require('../services/orderStatusSyncService');
 const statusSyncJob = require('../jobs/statusSyncJob');
+const transactionExportService = require('../services/transactionExportService');
+const transactionSyncJob = require('../jobs/transactionSyncJob');
 
 // Logger
 const log = logger;
@@ -1161,6 +1163,283 @@ router.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+// ============================================
+// ROUTES TRANSACTIONS BANCAIRES
+// ============================================
+
+/**
+ * GET /test/transactions/payouts
+ *
+ * Liste les derniers payouts Shopify Payments avec leur statut d'export.
+ *
+ * @route GET /test/transactions/payouts
+ * @param {number} [query.limit=20] - Nombre de payouts à récupérer
+ */
+router.get(
+  '/transactions/payouts',
+  asyncHandler(async (req, res) => {
+    const limit = parseInt(req.query.limit, 10) || 20;
+
+    log.info('Liste des payouts', { limit });
+
+    try {
+      const result = await transactionExportService.listPayouts(limit);
+
+      res.json({
+        success: true,
+        message: 'Liste des payouts Shopify Payments',
+        ...result,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      log.error('Erreur liste payouts', { error: error.message });
+
+      res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  })
+);
+
+/**
+ * GET /test/transactions/preview/:payoutId
+ *
+ * Prévisualise le fichier de transaction sans l'envoyer.
+ * Permet de voir le contenu du fichier avant export.
+ *
+ * @route GET /test/transactions/preview/:payoutId
+ */
+router.get(
+  '/transactions/preview/:payoutId',
+  asyncHandler(async (req, res) => {
+    const { payoutId } = req.params;
+
+    log.info('Prévisualisation du fichier de transaction', { payoutId });
+
+    try {
+      const result = await transactionExportService.previewPayoutFile(payoutId);
+
+      res.json({
+        success: true,
+        message: 'Prévisualisation du fichier de transaction',
+        ...result,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      log.error('Erreur prévisualisation transaction', { error: error.message });
+
+      res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  })
+);
+
+/**
+ * GET /test/transactions/download/:payoutId
+ *
+ * Télécharge le fichier de transaction en TXT.
+ * Génère le fichier à la volée et le renvoie au navigateur.
+ *
+ * @route GET /test/transactions/download/:payoutId
+ */
+router.get(
+  '/transactions/download/:payoutId',
+  asyncHandler(async (req, res) => {
+    const { payoutId } = req.params;
+
+    log.info('Téléchargement du fichier de transaction', { payoutId });
+
+    try {
+      const result = await transactionExportService.previewPayoutFile(payoutId);
+
+      if (!result.success) {
+        return res.status(404).json({
+          success: false,
+          error: result.error,
+        });
+      }
+
+      // Définir les headers pour le téléchargement
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${result.fileName}"`);
+
+      res.send(result.fileContent);
+    } catch (error) {
+      log.error('Erreur téléchargement transaction', { error: error.message });
+
+      res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  })
+);
+
+/**
+ * POST /test/transactions/export/:payoutId
+ *
+ * Exporte manuellement un payout vers SFTP.
+ *
+ * @route POST /test/transactions/export/:payoutId
+ * @param {boolean} [query.force=false] - Forcer l'export même si déjà exporté
+ * @param {boolean} [query.testMode=false] - Sauvegarder localement au lieu d'envoyer SFTP
+ */
+router.post(
+  '/transactions/export/:payoutId',
+  asyncHandler(async (req, res) => {
+    const { payoutId } = req.params;
+    const force = req.query.force === 'true';
+    const testMode = req.query.testMode === 'true' || config.test.testMode;
+
+    log.info('Export manuel du payout', { payoutId, force, testMode });
+
+    try {
+      const result = await transactionExportService.exportPayout(payoutId, {
+        force,
+        testMode,
+      });
+
+      res.json({
+        success: true,
+        message: result.skipped
+          ? 'Payout déjà exporté (utilisez ?force=true pour forcer)'
+          : 'Payout exporté avec succès',
+        ...result,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      log.error('Erreur export payout', { error: error.message });
+
+      res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  })
+);
+
+/**
+ * POST /test/transactions/export-all
+ *
+ * Exporte tous les payouts en attente (non encore exportés).
+ *
+ * @route POST /test/transactions/export-all
+ * @param {boolean} [query.testMode=false] - Sauvegarder localement
+ */
+router.post(
+  '/transactions/export-all',
+  asyncHandler(async (req, res) => {
+    const testMode = req.query.testMode === 'true' || config.test.testMode;
+
+    log.info('Export de tous les payouts en attente', { testMode });
+
+    try {
+      const result = await transactionExportService.exportAllPendingPayouts({
+        testMode,
+      });
+
+      res.json({
+        success: true,
+        message: 'Export des payouts terminé',
+        ...result,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      log.error('Erreur export all payouts', { error: error.message });
+
+      res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  })
+);
+
+/**
+ * POST /test/transactions/sync/run
+ *
+ * Lance manuellement le job de synchronisation des transactions.
+ *
+ * @route POST /test/transactions/sync/run
+ */
+router.post(
+  '/transactions/sync/run',
+  asyncHandler(async (req, res) => {
+    log.info('Lancement manuel de la synchronisation des transactions');
+
+    try {
+      const result = await transactionSyncJob.executeTransactionExport();
+
+      res.json({
+        success: true,
+        message: 'Synchronisation des transactions terminée',
+        ...result,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      log.error('Erreur sync transactions', { error: error.message });
+
+      res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  })
+);
+
+/**
+ * GET /test/transactions/sync/stats
+ *
+ * Récupère les statistiques du job de synchronisation des transactions.
+ *
+ * @route GET /test/transactions/sync/stats
+ */
+router.get('/transactions/sync/stats', (req, res) => {
+  const stats = transactionSyncJob.getStats();
+
+  res.json({
+    success: true,
+    message: 'Statistiques du job d\'export des transactions',
+    stats,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+/**
+ * POST /test/transactions/reset
+ *
+ * Réinitialise la liste des payouts déjà exportés.
+ * Utile pour forcer un ré-export complet.
+ *
+ * @route POST /test/transactions/reset
+ */
+router.post(
+  '/transactions/reset',
+  asyncHandler(async (req, res) => {
+    log.info('Réinitialisation de la liste des payouts exportés');
+
+    try {
+      await transactionExportService.resetExportedPayouts();
+
+      res.json({
+        success: true,
+        message: 'Liste des payouts exportés réinitialisée',
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      log.error('Erreur reset payouts', { error: error.message });
+
+      res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  })
+);
 
 /**
  * GET /test/debug-sftp

@@ -105,6 +105,8 @@ const config = {
     remoteDirIn: process.env.SFTP_REMOTE_DIR_IN || '/in/',
     // Dossier pour lire les statuts (retour de l'ERP)
     remoteDirOut: process.env.SFTP_REMOTE_DIR_OUT || '/out/',
+    // Dossier pour déposer les fichiers de transactions bancaires
+    remoteDirTransactions: process.env.SFTP_REMOTE_DIR_TRANSACTIONS || '/Transactions/',
   },
 
   // ============================================
@@ -119,6 +121,18 @@ const config = {
     archiveProcessed: process.env.STATUS_SYNC_ARCHIVE !== 'false',
     // Dossier d'archive pour les fichiers traités
     archiveDir: process.env.STATUS_SYNC_ARCHIVE_DIR || '/out/processed/',
+  },
+
+  // ============================================
+  // Configuration de l'export des transactions bancaires
+  // ============================================
+  transactionExport: {
+    // Activer/désactiver l'export automatique des transactions
+    enabled: process.env.TRANSACTION_EXPORT_ENABLED !== 'false',
+    // Expression cron (par défaut: 1 fois par jour à 6h du matin)
+    cronExpression: process.env.TRANSACTION_EXPORT_CRON || '0 6 * * *',
+    // Nombre de jours en arrière pour chercher les payouts (défaut: 7 jours)
+    lookbackDays: parseInt(process.env.TRANSACTION_EXPORT_LOOKBACK_DAYS, 10) || 7,
   },
 
   // ============================================
@@ -230,7 +244,9 @@ function printConfigSummary() {
   if (config.sftp.host) {
     console.log(`     - Dossier IN (commandes): ${config.sftp.remoteDirIn}`);
     console.log(`     - Dossier OUT (statuts): ${config.sftp.remoteDirOut}`);
+    console.log(`     - Dossier Transactions: ${config.sftp.remoteDirTransactions}`);
   }
+  console.log(`   • Export transactions auto: ${config.transactionExport.enabled ? 'Activé' : 'Désactivé'}`);
   console.log('');
 }
 
