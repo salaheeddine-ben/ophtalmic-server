@@ -49,7 +49,8 @@ const config = {
     locationId: process.env.SHOPIFY_LOCATION_ID,
 
     // Version de l'API Shopify à utiliser
-    apiVersion: '2024-01',
+    // Note: 2025-10 requis pour externalTraceId (référence bancaire payout)
+    apiVersion: '2025-10',
   },
 
   // ============================================
