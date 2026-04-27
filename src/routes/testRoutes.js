@@ -583,6 +583,9 @@ router.get(
     } else if (req.query.dir === 'in') {
       remoteDir = config.sftp.remoteDirIn;
       activeTab = 'in';
+    } else if (req.query.dir === 'transactions') {
+      remoteDir = config.sftp.remoteDirTransactions;
+      activeTab = 'transactions';
     } else if (req.query.dir) {
       remoteDir = req.query.dir;
       activeTab = 'custom';
@@ -883,12 +886,15 @@ function generateSftpBrowserHtml(files, remoteDir, error, activeTab = 'in') {
       <a href="/test/sftp-browser?dir=out" class="tab ${activeTab === 'out' ? 'active' : ''}">
         <span class="tab-icon">📥</span>OUT (Statuts)
       </a>
+      <a href="/test/sftp-browser?dir=transactions" class="tab ${activeTab === 'transactions' ? 'active' : ''}">
+        <span class="tab-icon">💰</span>Transactions
+      </a>
     </div>
 
     <div class="info-box">
       <strong>📂 Dossier actuel:</strong> ${remoteDir}<br>
       <strong>🖥️ Serveur:</strong> ${config.sftp.host}:${config.sftp.port}<br>
-      <strong>📋 Description:</strong> ${activeTab === 'in' ? 'Commandes envoyées vers l\'ERP' : activeTab === 'out' ? 'Fichiers de statut reçus de l\'ERP' : 'Dossier personnalisé'}
+      <strong>📋 Description:</strong> ${activeTab === 'in' ? 'Commandes envoyées vers l\'ERP' : activeTab === 'out' ? 'Fichiers de statut reçus de l\'ERP' : activeTab === 'transactions' ? 'Fichiers de transactions bancaires exportés' : 'Dossier personnalisé'}
     </div>
 
     <a href="/test/sftp-browser?dir=${activeTab}" class="refresh-btn">🔄 Rafraîchir</a>
@@ -1089,6 +1095,42 @@ router.get(
       });
     } catch (error) {
       log.error('Erreur liste fichiers /out/', { error: error.message });
+
+      res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  })
+);
+
+/**
+ * GET /test/sftp/transactions
+ *
+ * Liste les fichiers dans le dossier /Transactions/ (exports bancaires).
+ *
+ * @route GET /test/sftp/transactions
+ */
+router.get(
+  '/sftp/transactions',
+  asyncHandler(async (req, res) => {
+    const remoteDir = config.sftp.remoteDirTransactions;
+
+    log.info('Liste des fichiers dans /Transactions/', { remoteDir });
+
+    try {
+      const files = await sftpService.listFiles(remoteDir);
+
+      res.json({
+        success: true,
+        directory: remoteDir,
+        description: 'Fichiers de transactions bancaires exportés',
+        fileCount: files.length,
+        files,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      log.error('Erreur liste fichiers /Transactions/', { error: error.message });
 
       res.status(500).json({
         success: false,
