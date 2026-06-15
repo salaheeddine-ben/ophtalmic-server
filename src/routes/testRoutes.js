@@ -514,6 +514,92 @@ router.post(
 );
 
 /**
+ * POST /test/export-order/:orderRef
+ *
+ * Exporte manuellement une commande vers SFTP par son ID ou son nom.
+ * Utile pour renvoyer des commandes qui n'ont pas été envoyées.
+ *
+ * @route POST /test/export-order/:orderRef
+ * @param {string} orderRef - ID numérique ou nom de la commande (ex: 7919690711387 ou SH1-1020)
+ * @param {boolean} [query.testMode=false] - Sauvegarder localement au lieu d'envoyer SFTP
+ */
+router.post(
+  '/export-order/:orderRef',
+  asyncHandler(async (req, res) => {
+    const { orderRef } = req.params;
+    const testMode = req.query.testMode === 'true';
+
+    log.info('Export manuel de commande', { orderRef, testMode });
+
+    try {
+      let order;
+
+      // Déterminer si c'est un ID numérique ou un nom de commande
+      if (/^\d+$/.test(orderRef)) {
+        // C'est un ID numérique - récupérer directement
+        log.info('Récupération de la commande par ID', { orderId: orderRef });
+        order = await shopifyService.getOrder(orderRef);
+      } else {
+        // C'est un nom de commande (ex: SH1-1020) - rechercher
+        log.info('Recherche de la commande par nom', { orderName: orderRef });
+        order = await shopifyService.findOrderByName(orderRef);
+      }
+
+      if (!order) {
+        return res.status(404).json({
+          success: false,
+          message: `Commande non trouvée: ${orderRef}`,
+          tip: 'Vérifiez le numéro de commande ou utilisez l\'ID numérique Shopify',
+        });
+      }
+
+      log.info('Commande trouvée', {
+        orderId: order.id,
+        orderName: order.name,
+        createdAt: order.created_at,
+      });
+
+      // Forcer le mode test si demandé
+      const originalTestMode = config.test.testMode;
+      if (testMode) {
+        config.test.testMode = true;
+      }
+
+      try {
+        // Exporter la commande
+        const result = await orderExportService.exportOrder(order);
+
+        res.json({
+          success: true,
+          message: 'Commande exportée avec succès',
+          orderRef,
+          orderId: order.id,
+          orderName: order.name,
+          testMode: testMode || originalTestMode,
+          ...result,
+          timestamp: new Date().toISOString(),
+        });
+      } finally {
+        // Restaurer le mode original
+        config.test.testMode = originalTestMode;
+      }
+    } catch (error) {
+      log.error('Erreur lors de l\'export manuel', {
+        orderRef,
+        error: error.message,
+      });
+
+      res.status(500).json({
+        success: false,
+        message: 'Erreur lors de l\'export de la commande',
+        orderRef,
+        error: error.message,
+      });
+    }
+  })
+);
+
+/**
  * GET /test/sftp-file/:filename
  *
  * Lit le contenu d'un fichier distant sur le serveur SFTP.
