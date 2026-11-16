@@ -62,7 +62,7 @@ function generateOrderFileContent(order) {
     billing.zip !== shipping.zip;
 
   // Récupérer le téléphone (obligatoire selon le client - mettre 0 si absent)
-  const phoneNumber = shipping.phone || billing.phone || order.phone || '0';
+  const phoneNumber = normalizePhoneNumber(shipping.phone || billing.phone || order.phone);
 
   // ============================================
   // Récupérer les montants directement de Shopify (pas de calcul)
@@ -188,6 +188,23 @@ function generateOrderFileContent(order) {
   });
 
   return fileContent;
+}
+
+/**
+ * Normalise un numéro de téléphone au format international
+ * Corrige le cas +330XXXXXXXX → +33XXXXXXXX (double zéro après indicatif FR)
+ *
+ * @param {string} phone - Numéro de téléphone brut
+ * @returns {string} Numéro normalisé
+ */
+function normalizePhoneNumber(phone) {
+  if (!phone) return '0';
+  const cleaned = String(phone).trim();
+  // Cas +330XXXXXXX : indicatif +33 suivi du 0 local → supprimer le 0
+  if (/^\+330\d{8,9}$/.test(cleaned)) {
+    return '+33' + cleaned.slice(4); // retire le '0' après '+33'
+  }
+  return cleaned;
 }
 
 /**
@@ -647,4 +664,5 @@ module.exports = {
   listLocalOrderFiles,
   saveFileLocally,
   sanitizeText,
+  normalizePhoneNumber,
 };
